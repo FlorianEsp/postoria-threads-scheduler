@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import io
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from html import escape
@@ -1459,6 +1461,8 @@ with tabs[0]:
         preset_a, preset_c = st.columns([1, 1])
         if preset_a.button("Tous les comptes actifs"):
             st.session_state["selected_group_filters"] = group_options
+            st.session_state["manual_included_accounts"] = []
+            st.session_state["manual_excluded_accounts"] = []
             st.session_state.pop("_account_group_signature", None)
             for account in accounts:
                 account_id = int(account["id"])
@@ -1471,12 +1475,21 @@ with tabs[0]:
             render_create_group_dialog()
 
         selected_group_filters = st.session_state.get("selected_group_filters", [])
+        manual_included = set(st.session_state.get("manual_included_accounts", []))
+        manual_excluded = set(st.session_state.get("manual_excluded_accounts", []))
         group_signature = tuple(selected_group_filters)
         if st.session_state.get("_account_group_signature") != group_signature:
             for account in accounts:
                 account_id = int(account["id"])
-                group_name = account.get("group_name") or "tous"
-                st.session_state[f"account_use_{account_id}"] = bool(account.get("active_for_day", 1)) and group_name in selected_group_filters
+                group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
+                active = bool(st.session_state.get(f"account_active_{account_id}", bool(account.get("active_for_day", 1))))
+                base_use = active and group_name in selected_group_filters
+                if account_id in manual_excluded:
+                    st.session_state[f"account_use_{account_id}"] = False
+                elif account_id in manual_included:
+                    st.session_state[f"account_use_{account_id}"] = True
+                else:
+                    st.session_state[f"account_use_{account_id}"] = base_use
             st.session_state["_account_group_signature"] = group_signature
 
         group_cols = st.columns(min(3, max(1, len(groups))))
@@ -1598,6 +1611,10 @@ with tabs[0]:
                 st.markdown(f"**Comptes sélectionnés · {len(selected_accounts_preview)}**")
             with header_right:
                 if st.button("Vider sélection", disabled=not selected_accounts_preview):
+                    st.session_state["selected_group_filters"] = []
+                    st.session_state["manual_included_accounts"] = []
+                    st.session_state["manual_excluded_accounts"] = []
+                    st.session_state.pop("_account_group_signature", None)
                     for account in selected_accounts_preview:
                         st.session_state[f"account_use_{int(account['id'])}"] = False
                     st.rerun()
@@ -1645,6 +1662,8 @@ with tabs[0]:
             )
 
         rows = []
+        manual_included = set(st.session_state.get("manual_included_accounts", []))
+        manual_excluded = set(st.session_state.get("manual_excluded_accounts", []))
         for row_index, account in enumerate(visible_accounts):
             account_id = int(account["id"])
             if row_index:
@@ -1706,6 +1725,16 @@ with tabs[0]:
                 st.session_state[f"account_active_{account_id}"] = active_account
                 status_text = account_status_label({**account, "group_name": selected_group, "active_for_day": int(active_account)})
                 st.markdown(f"<span class='status-text'>{h(status_text)}</span>", unsafe_allow_html=True)
+                base_use = active_account and selected_group in st.session_state.get("selected_group_filters", [])
+                if bool(use_account) == base_use:
+                    manual_included.discard(account_id)
+                    manual_excluded.discard(account_id)
+                elif bool(use_account):
+                    manual_included.add(account_id)
+                    manual_excluded.discard(account_id)
+                else:
+                    manual_excluded.add(account_id)
+                    manual_included.discard(account_id)
             with row_cols[5]:
                 account_url = account_threads_url(account) or account.get("url")
                 action_link = (
@@ -1724,6 +1753,8 @@ with tabs[0]:
                     "url": account.get("url", ""),
                 }
             )
+        st.session_state["manual_included_accounts"] = sorted(manual_included)
+        st.session_state["manual_excluded_accounts"] = sorted(manual_excluded)
 
         hidden_ids = {int(account["id"]) for account in visible_accounts}
         for account in accounts:
@@ -1888,21 +1919,35 @@ with tabs[2]:
                 help="Colonnes: text, media_ids, media_folder, reply_1, reply_2. Autres colonnes = variables {colonne}.",
             )
             if uploaded:
-                frame = pd.read_csv(uploaded)
-                records = make_post_records(frame)
-                added, skipped, imported_ids = db.add_posts_with_ids(records)
-                imported_posts = [
-                    post for post in db.list_posts(active_only=False)
-                    if int(post["id"]) in set(imported_ids)
-                ]
-                st.session_state["selected_posts"] = imported_posts
-                st.session_state["_selected_posts_signature"] = tuple(sorted(imported_ids))
-                st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
-                if imported_ids:
-                    if clear_preview_draft("Preview brouillon supprimée: nouveaux posts importés. Les posts déjà planifiés restent conservés."):
-                        st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
-                st.success(f"{added} posts ajoutés, {skipped} doublons réutilisés. Lot actif: {len(imported_posts)} posts du CSV.")
-                posts = db.list_posts(active_only=False)
+                csv_bytes = uploaded.getvalue()
+                csv_hash = hashlib.sha256(csv_bytes).hexdigest()
+                already_imported = st.session_state.get("last_imported_csv_hash") == csv_hash
+                st.caption(f"Fichier prêt: {uploaded.name} · {len(csv_bytes)} bytes")
+                if already_imported:
+                    st.info("Ce CSV est déjà importé pour cette session. Choisis un autre fichier ou force un nouvel import si nécessaire.")
+                import_cols = st.columns([1, 1])
+                with import_cols[0]:
+                    import_csv = st.button("Importer ce CSV", disabled=already_imported)
+                with import_cols[1]:
+                    force_import_csv = st.button("Forcer réimport", disabled=not already_imported)
+                if import_csv or force_import_csv:
+                    frame = pd.read_csv(io.BytesIO(csv_bytes))
+                    records = make_post_records(frame)
+                    added, skipped, imported_ids = db.add_posts_with_ids(records)
+                    imported_posts = [
+                        post for post in db.list_posts(active_only=False)
+                        if int(post["id"]) in set(imported_ids)
+                    ]
+                    st.session_state["last_imported_csv_hash"] = csv_hash
+                    st.session_state["last_imported_csv_name"] = uploaded.name
+                    st.session_state["selected_posts"] = imported_posts
+                    st.session_state["_selected_posts_signature"] = tuple(sorted(imported_ids))
+                    st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                    if imported_ids:
+                        if clear_preview_draft("Preview brouillon supprimée: nouveaux posts importés. Les posts déjà planifiés restent conservés."):
+                            st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
+                    st.success(f"{added} posts ajoutés, {skipped} doublons réutilisés. Lot actif: {len(imported_posts)} posts du CSV.")
+                    posts = db.list_posts(active_only=False)
         with manual_col:
             with st.form("manual_posts"):
                 bulk = st.text_area("Ajouter textes", height=120, placeholder="Un texte par ligne")
@@ -2054,6 +2099,13 @@ with tabs[3]:
         if not st.session_state.get("selected_posts"):
             blockers.append("Aucun post sélectionné.")
         render_locked_step("Preview bloquée: termine les étapes précédentes.", blockers)
+    default_batch_name = f"Lot {datetime.now(ZoneInfo(APP_TZ)).strftime('%Y-%m-%d %H:%M')}"
+    preview_batch_name = st.text_input(
+        "Nom du nouveau lot preview",
+        value=st.session_state.get("next_preview_batch_name", default_batch_name),
+        help="Nom local seulement. Il sert à retrouver/restaurer une preview, pas à publier.",
+    )
+    st.session_state["next_preview_batch_name"] = preview_batch_name
     if st.button("Générer preview", disabled=not enough_context):
         try:
             rows = generate_schedule(
@@ -2071,9 +2123,9 @@ with tabs[3]:
                 randomize_times=True,
                 media_library=db.media_folder_map(),
             )
-            db.save_preview(rows)
+            batch_id = db.save_preview(rows, preview_batch_name)
             st.session_state["preview_rows"] = db.list_scheduled("preview")
-            st.success(f"Planning généré : {len(rows)} posts.")
+            st.success(f"Planning généré : {len(rows)} posts dans le lot {batch_id}.")
         except Exception as e:
             st.error(str(e))
 
@@ -2081,6 +2133,53 @@ with tabs[3]:
     if all_scheduled:
         st.markdown("### Preview, planifiés & failed")
         render_status_counts(all_scheduled)
+        batches = db.list_preview_batches()
+        if batches:
+            with st.expander("Lots de preview", expanded=False):
+                st.caption("Restaurer remplace seulement la preview brouillon. Supprimer enlève uniquement les lignes locales en preview/ancienne preview, jamais les posts déjà planifiés sur Postoria.")
+                batch_frame = pd.DataFrame(
+                    [
+                        {
+                            "lot": batch["name"],
+                            "statut": batch["status"],
+                            "posts": int(batch.get("post_count") or 0),
+                            "preview": int(batch.get("preview_count") or 0),
+                            "ancienne_preview": int(batch.get("saved_count") or 0),
+                            "planifiés_ou_envoyés": int(batch.get("sent_or_scheduled_count") or 0),
+                            "début": batch.get("first_post") or "",
+                            "fin": batch.get("last_post") or "",
+                            "id": batch["id"],
+                        }
+                        for batch in batches
+                    ]
+                )
+                st.dataframe(batch_frame, use_container_width=True, hide_index=True, height=min(360, 80 + len(batch_frame) * 36))
+                for batch in batches[:8]:
+                    batch_id = str(batch["id"])
+                    cols = st.columns([2.2, .8, .8, .8])
+                    with cols[0]:
+                        new_name = st.text_input(
+                            "Nom du lot",
+                            value=str(batch.get("name") or batch_id),
+                            key=f"preview_batch_name_{batch_id}",
+                            label_visibility="collapsed",
+                        )
+                    with cols[1]:
+                        if st.button("Renommer", key=f"rename_preview_batch_{batch_id}"):
+                            db.update_preview_batch_name(batch_id, new_name)
+                            st.rerun()
+                    with cols[2]:
+                        can_restore = int(batch.get("saved_count") or 0) > 0
+                        if st.button("Restaurer", key=f"restore_preview_batch_{batch_id}", disabled=not can_restore):
+                            restored = db.restore_preview_batch(batch_id)
+                            st.success(f"{restored} posts restaurés en preview brouillon.")
+                            st.rerun()
+                    with cols[3]:
+                        deletable = int(batch.get("preview_count") or 0) + int(batch.get("saved_count") or 0)
+                        if st.button("Suppr. local", key=f"delete_preview_batch_{batch_id}", disabled=not deletable):
+                            deleted = db.delete_preview_batch(batch_id)
+                            st.warning(f"{deleted} posts preview supprimés localement. Postoria n'est pas modifié.")
+                            st.rerun()
         category_counts = schedule_category_counts(all_scheduled)
         category_labels = [
             f"Preview brouillon ({category_counts['Preview brouillon']})",
@@ -2202,9 +2301,20 @@ with tabs[4]:
     section_intro(
         "Étape 5",
         "Contrôle les volumes par compte, groupe et période.",
-        "Les analytics utilisent tous les posts connus: preview, scheduled, published, failed et erreurs.",
+        "Par défaut, les brouillons preview sont exclus pour ne pas mélanger planification test et historique réel.",
     )
-    render_analytics(db.list_scheduled())
+    include_preview_analytics = st.checkbox(
+        "Inclure les previews dans les analytics",
+        value=False,
+        help="Active seulement pour analyser un lot avant envoi. Les volumes réels excluent preview et anciennes previews.",
+    )
+    analytics_rows = db.list_scheduled()
+    if not include_preview_analytics:
+        analytics_rows = [
+            row for row in analytics_rows
+            if str(row.get("status")) not in ("preview", "preview_saved")
+        ]
+    render_analytics(analytics_rows)
 
 with tabs[5]:
     st.subheader("Envoi Postoria")

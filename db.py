@@ -178,6 +178,14 @@ def init_db() -> None:
                 error TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS preview_batches (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         _ensure_column(conn, "post_library", "media_ids", "TEXT DEFAULT ''")
@@ -194,8 +202,27 @@ def init_db() -> None:
         _ensure_column(conn, "scheduled_posts", "variables_json", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "chain_replies", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "preview_batch_id", "TEXT")
+        _ensure_column(conn, "preview_batches", "name", "TEXT DEFAULT ''")
+        _ensure_column(conn, "preview_batches", "status", "TEXT DEFAULT 'active'")
+        _ensure_column(conn, "preview_batches", "updated_at", "TEXT")
         conn.execute(
             "INSERT OR IGNORE INTO account_groups (name, offset_minutes) VALUES ('tous', 0)"
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO preview_batches (id, name, status)
+            SELECT
+                preview_batch_id,
+                'Preview ' || preview_batch_id,
+                CASE
+                    WHEN SUM(CASE WHEN status = 'preview' THEN 1 ELSE 0 END) > 0
+                    THEN 'active'
+                    ELSE 'archived'
+                END
+            FROM scheduled_posts
+            WHERE preview_batch_id IS NOT NULL AND preview_batch_id != ''
+            GROUP BY preview_batch_id
+            """
         )
 
 
@@ -407,13 +434,37 @@ def media_folder_map() -> dict[str, list[str]]:
     return {folder["name"]: folder["media_ids"] for folder in list_media_folders()}
 
 
-def save_preview(rows: list[dict[str, Any]]) -> None:
+def save_preview(rows: list[dict[str, Any]], name: str | None = None) -> str:
     from datetime import datetime
 
-    batch_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    batch_id = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    batch_name = str(name or "").strip() or f"Preview {batch_id}"
     with connect() as conn:
+        active_batches = [
+            str(row["preview_batch_id"])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT preview_batch_id
+                FROM scheduled_posts
+                WHERE status = 'preview' AND preview_batch_id IS NOT NULL
+                """
+            ).fetchall()
+            if row["preview_batch_id"]
+        ]
+        for active_batch_id in active_batches:
+            conn.execute(
+                "UPDATE preview_batches SET status='archived', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (active_batch_id,),
+            )
         conn.execute(
             "UPDATE scheduled_posts SET status = 'preview_saved' WHERE status = 'preview'"
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO preview_batches (id, name, status, updated_at)
+            VALUES (?, ?, 'active', CURRENT_TIMESTAMP)
+            """,
+            (batch_id, batch_name),
         )
         for r in rows:
             conn.execute(
@@ -431,11 +482,126 @@ def save_preview(rows: list[dict[str, Any]]) -> None:
                     batch_id,
                 ),
             )
+    return batch_id
 
 
 def clear_preview() -> None:
     with connect() as conn:
+        active_batches = [
+            str(row["preview_batch_id"])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT preview_batch_id
+                FROM scheduled_posts
+                WHERE status = 'preview' AND preview_batch_id IS NOT NULL
+                """
+            ).fetchall()
+            if row["preview_batch_id"]
+        ]
         conn.execute("DELETE FROM scheduled_posts WHERE status = 'preview'")
+        for batch_id in active_batches:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS count FROM scheduled_posts WHERE preview_batch_id=?",
+                (batch_id,),
+            ).fetchone()
+            if remaining and int(remaining["count"] or 0):
+                conn.execute(
+                    "UPDATE preview_batches SET status='archived', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (batch_id,),
+                )
+            else:
+                conn.execute("DELETE FROM preview_batches WHERE id=?", (batch_id,))
+
+
+def list_preview_batches() -> list[dict[str, Any]]:
+    with connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT
+                    b.id,
+                    b.name,
+                    b.status,
+                    b.created_at,
+                    b.updated_at,
+                    COUNT(s.id) AS post_count,
+                    SUM(CASE WHEN s.status = 'preview' THEN 1 ELSE 0 END) AS preview_count,
+                    SUM(CASE WHEN s.status = 'preview_saved' THEN 1 ELSE 0 END) AS saved_count,
+                    SUM(CASE WHEN s.status NOT IN ('preview', 'preview_saved') THEN 1 ELSE 0 END) AS sent_or_scheduled_count,
+                    MIN(s.scheduled_time_local) AS first_post,
+                    MAX(s.scheduled_time_local) AS last_post
+                FROM preview_batches b
+                LEFT JOIN scheduled_posts s ON s.preview_batch_id = b.id
+                GROUP BY b.id
+                ORDER BY b.created_at DESC, b.id DESC
+                """
+            ).fetchall()
+        ]
+
+
+def update_preview_batch_name(batch_id: str, name: str) -> None:
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        return
+    with connect() as conn:
+        conn.execute(
+            "UPDATE preview_batches SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (clean_name, str(batch_id)),
+        )
+
+
+def restore_preview_batch(batch_id: str) -> int:
+    with connect() as conn:
+        active_batches = [
+            str(row["preview_batch_id"])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT preview_batch_id
+                FROM scheduled_posts
+                WHERE status = 'preview' AND preview_batch_id IS NOT NULL
+                """
+            ).fetchall()
+            if row["preview_batch_id"]
+        ]
+        conn.execute("UPDATE scheduled_posts SET status='preview_saved' WHERE status='preview'")
+        for active_batch_id in active_batches:
+            conn.execute(
+                "UPDATE preview_batches SET status='archived', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (active_batch_id,),
+            )
+        cursor = conn.execute(
+            "UPDATE scheduled_posts SET status='preview' WHERE preview_batch_id=? AND status='preview_saved'",
+            (str(batch_id),),
+        )
+        restored = int(cursor.rowcount or 0)
+        if restored:
+            conn.execute(
+                "UPDATE preview_batches SET status='active', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (str(batch_id),),
+            )
+        return restored
+
+
+def delete_preview_batch(batch_id: str) -> int:
+    with connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM scheduled_posts WHERE preview_batch_id=? AND status IN ('preview', 'preview_saved')",
+            (str(batch_id),),
+        )
+        deleted = int(cursor.rowcount or 0)
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS count FROM scheduled_posts WHERE preview_batch_id=?",
+            (str(batch_id),),
+        ).fetchone()
+        if remaining and int(remaining["count"] or 0):
+            conn.execute(
+                "UPDATE preview_batches SET status='locked', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (str(batch_id),),
+            )
+        else:
+            conn.execute("DELETE FROM preview_batches WHERE id=?", (str(batch_id),))
+        return deleted
 
 
 def update_scheduled_result(local_id: int, postoria_post_id: int | None, status: str, error: str | None = None) -> None:
