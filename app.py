@@ -406,6 +406,31 @@ def h(value) -> str:
     return escape(str(value or ""), quote=True)
 
 
+def choose_option(
+    label: str,
+    options: list,
+    index: int = 0,
+    key: str | None = None,
+    format_func=None,
+    horizontal: bool = False,
+    label_visibility: str = "visible",
+    help: str | None = None,
+):
+    if not options:
+        return None
+    safe_index = min(max(int(index), 0), len(options) - 1)
+    return st.radio(
+        label,
+        options,
+        index=safe_index,
+        key=key,
+        format_func=format_func or (lambda value: str(value)),
+        horizontal=horizontal,
+        label_visibility=label_visibility,
+        help=help,
+    )
+
+
 def widget_slug(value: str) -> str:
     return "".join(char.lower() if char.isalnum() else "_" for char in str(value or "item")).strip("_") or "item"
 
@@ -530,11 +555,11 @@ def render_analytics(rows: list[dict]) -> None:
 
     f1, f2, f3 = st.columns(3)
     with f1:
-        status_filter = st.selectbox("Statut", status_options, key="analytics_status")
+        status_filter = choose_option("Statut", status_options, key="analytics_status")
     with f2:
-        group_filter = st.selectbox("Groupe", group_options, key="analytics_group")
+        group_filter = choose_option("Groupe", group_options, key="analytics_group")
     with f3:
-        account_filter = st.selectbox("Compte", account_options, key="analytics_account")
+        account_filter = choose_option("Compte", account_options, key="analytics_account")
 
     filtered = df.copy()
     if status_filter != "Tous":
@@ -649,9 +674,9 @@ def render_workspace_picker(client: PostoriaClient | None, key_prefix: str) -> i
         st.success(f"Workspace sélectionné : {workspaces[0].get('name', workspace_ids[0])}")
         return workspace_ids[0]
 
-    picked_workspace = st.selectbox(
+    picked_workspace = choose_option(
         "Workspace Postoria",
-        options=workspace_ids,
+        workspace_ids,
         index=current_index,
         format_func=lambda wid: next(str(w.get("name", wid)) for w in workspaces if str(w["id"]) == str(wid)),
         key=f"{key_prefix}_workspace_id",
@@ -1397,9 +1422,10 @@ with tabs[0]:
         workspaces = st.session_state.get("workspaces", [])
         with workspace_col:
             if workspaces:
-                workspace_id = st.selectbox(
+                workspace_ids = [w["id"] for w in workspaces]
+                workspace_id = choose_option(
                     "Workspace",
-                    options=[w["id"] for w in workspaces],
+                    workspace_ids,
                     format_func=lambda wid: next(w["name"] for w in workspaces if w["id"] == wid),
                 )
                 st.session_state["workspace_id"] = workspace_id
@@ -1483,13 +1509,18 @@ with tabs[0]:
                     st.rerun()
 
         with st.expander("Sélection avancée par nom de groupe"):
-            advanced_groups = st.multiselect(
-                "Groupes à utiliser",
-                options=group_options,
-                default=st.session_state.get("selected_group_filters", []),
-                help="Choisir un groupe ajoute tous ses comptes. Tu peux décocher un compte ensuite.",
-            )
-            if advanced_groups != st.session_state.get("selected_group_filters", []):
+            st.caption("Coche uniquement les groupes à inclure. Aucun champ texte ici.")
+            current_groups = set(st.session_state.get("selected_group_filters", []))
+            advanced_groups = []
+            for group_name in group_options:
+                checked = st.checkbox(
+                    group_name,
+                    value=group_name in current_groups,
+                    key=f"advanced_group_{widget_slug(group_name)}",
+                )
+                if checked:
+                    advanced_groups.append(group_name)
+            if set(advanced_groups) != current_groups:
                 st.session_state["selected_group_filters"] = advanced_groups
                 st.session_state.pop("_account_group_signature", None)
                 st.rerun()
@@ -1640,10 +1671,16 @@ with tabs[0]:
                     unsafe_allow_html=True,
                 )
             with row_cols[2]:
-                selected_group = st.selectbox(
+                group_index = 0
+                current_group = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
+                if current_group in group_options:
+                    group_index = group_options.index(current_group)
+                selected_group = choose_option(
                     f"Groupe {account_id}",
-                    options=group_options,
+                    group_options,
+                    index=group_index,
                     key=f"account_group_{account_id}",
+                    horizontal=len(group_options) <= 3,
                     label_visibility="collapsed",
                 )
                 st.markdown(
@@ -1657,11 +1694,12 @@ with tabs[0]:
                 )
             with row_cols[4]:
                 active_before = bool(st.session_state.get(f"account_active_{account_id}", bool(account.get("active_for_day", 1))))
-                status_choice = st.selectbox(
+                status_choice = choose_option(
                     f"Statut {account_id}",
                     ["Active", "Paused"],
                     index=0 if active_before else 1,
                     key=f"account_status_{account_id}",
+                    horizontal=True,
                     label_visibility="collapsed",
                 )
                 active_account = status_choice == "Active"
@@ -1869,7 +1907,7 @@ with tabs[2]:
             with st.form("manual_posts"):
                 bulk = st.text_area("Ajouter textes", height=120, placeholder="Un texte par ligne")
                 media_for_bulk = st.text_input("Media IDs pour ces textes")
-                folder_for_bulk = st.selectbox("Dossier média", folder_options)
+                folder_for_bulk = choose_option("Dossier média", folder_options, horizontal=len(folder_options) <= 4)
                 variables_for_bulk = st.text_input("Variables", placeholder="firstname=Lucas, city=Paris")
                 replies_for_bulk = st.text_area("Réponses automatiques", height=90, placeholder="Une réponse par ligne")
                 add_manual = st.form_submit_button("Ajouter")
@@ -1932,13 +1970,13 @@ with tabs[2]:
                     "id": st.column_config.NumberColumn("ID", disabled=True),
                     "caption": st.column_config.TextColumn("Texte", disabled=True, width="large"),
                     "media_ids": st.column_config.TextColumn("Media IDs", width="medium"),
-                    "media_folder": st.column_config.SelectboxColumn("Dossier média", options=folder_options),
+                    "media_folder": st.column_config.TextColumn("Dossier média", disabled=True),
                     "variables": st.column_config.TextColumn("Variables", width="medium"),
                     "reply_chain": st.column_config.TextColumn("Replies", width="medium"),
                     "photo_note": st.column_config.TextColumn("Note photo", width="medium"),
                     "used": st.column_config.NumberColumn("Usages", disabled=True),
                 },
-                disabled=["id", "caption", "used"],
+                disabled=["id", "caption", "media_folder", "used"],
                 key=f"posts_editor_{st.session_state.get('posts_editor_version', 0)}",
             )
             if st.button("Tout sélectionner"):
@@ -2084,12 +2122,12 @@ with tabs[3]:
             status_options = ["Tous"] + sorted(all_df["status"].dropna().astype(str).unique().tolist())
         with filter_col:
             st.markdown("#### Filtres")
-            status_filter = st.selectbox("Statut", status_options, index=0)
+            status_filter = choose_option("Statut", status_options, index=0)
             date_filter = st.radio("Date", ["Tout", "Aujourd'hui", "Semaine", "Mois"], horizontal=False)
-            account_filter = st.selectbox("Compte", account_options, index=0)
-            group_filter = st.selectbox("Groupe", group_options, index=0)
+            account_filter = choose_option("Compte", account_options, index=0)
+            group_filter = choose_option("Groupe", group_options, index=0)
             view_mode = st.radio("Vue", ["Tout", "Par compte", "Par jour", "Par groupe", "Failed"], horizontal=False)
-            sort_mode = st.selectbox("Tri", ["Heure", "Compte", "Jour", "Statut"], index=0)
+            sort_mode = choose_option("Tri", ["Heure", "Compte", "Jour", "Statut"], index=0)
         with list_col:
             query = st.text_input("Rechercher posts, comptes, erreurs", placeholder="Recherche...")
             filtered = filter_scheduled_rows(category_rows, status_filter, date_filter, account_filter, group_filter, query)
