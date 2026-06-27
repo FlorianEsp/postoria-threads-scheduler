@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+from html import escape
 from math import floor
 from zoneinfo import ZoneInfo
 
@@ -244,10 +245,20 @@ def planned_total_range(account_count: int, posts_min: int, posts_max: int) -> t
     return account_count * posts_min, account_count * posts_max
 
 
+def h(value) -> str:
+    return escape(str(value or ""), quote=True)
+
+
 def render_locked_step(title: str, blockers: list[str]) -> None:
-    st.warning(title)
-    for blocker in blockers:
-        st.caption(f"- {blocker}")
+    items = "".join(f"<li>{h(blocker)}</li>" for blocker in blockers)
+    st.markdown(
+        "<div class='blocked-panel'>"
+        "<div class='blocked-kicker'>Action requise</div>"
+        f"<strong>{h(title)}</strong>"
+        f"<ul>{items}</ul>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_group_cards(groups: list[dict], grouped: dict[str, dict] | None = None) -> None:
@@ -255,19 +266,19 @@ def render_group_cards(groups: list[dict], grouped: dict[str, dict] | None = Non
         st.info("Aucun groupe. Crée un groupe, puis assigne les comptes.")
         return
     grouped = grouped or {}
-    cols = st.columns(min(4, max(1, len(groups))))
-    for idx, group in enumerate(groups):
+    chips = []
+    for group in groups:
         name = group["name"]
         selected_count = len(grouped.get(name, {}).get("accounts", []))
-        with cols[idx % len(cols)]:
-            st.markdown(
-                "<div class='step-note'>"
-                f"<b>{name}</b><br>"
-                f"{selected_count} sélectionnés<br>"
-                f"<small>{group.get('account_count', 0)} comptes assignés</small>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
+        state = "is-active" if selected_count else ""
+        chips.append(
+            f"<div class='group-chip {state}'>"
+            f"<span>{h(name)}</span>"
+            f"<b>{selected_count}</b>"
+            f"<small>{int(group.get('account_count', 0) or 0)} assignés</small>"
+            "</div>"
+        )
+    st.markdown("<div class='group-strip'>" + "".join(chips) + "</div>", unsafe_allow_html=True)
 
 
 def section_intro(step: str, title: str, body: str) -> None:
@@ -295,15 +306,63 @@ def render_flow_status(
         ("4", "Preview", preview_ready),
         ("5", "Envoi", send_ready),
     ]
-    cols = st.columns(5)
-    for col, (number, label, ready) in zip(cols, steps):
-        state = "OK" if ready else "À faire"
-        col.markdown(
-            "<div class='step-note'>"
-            f"<b>{number}. {label}</b><br>{state}"
-            "</div>",
-            unsafe_allow_html=True,
+    items = []
+    for number, label, ready in steps:
+        items.append(
+            f"<div class='flow-step {'is-done' if ready else 'is-pending'}'>"
+            f"<span>{number}</span>"
+            f"<strong>{h(label)}</strong>"
+            f"<small>{'OK' if ready else 'À faire'}</small>"
+            "</div>"
         )
+    st.markdown("<div class='flow-rail'>" + "".join(items) + "</div>", unsafe_allow_html=True)
+
+
+def render_app_header(api_exists: bool, dry_run: bool, app_tz: str) -> None:
+    api_state = "API détectée" if api_exists else "API manquante"
+    run_state = "Dry-run actif" if dry_run else "Envoi réel armé"
+    st.markdown(
+        "<div class='app-hero'>"
+        "<div>"
+        "<span class='eyebrow'>Bulk Threads</span>"
+        "<h1>Scheduler de publication</h1>"
+        "<p>Un parcours en 5 étapes pour choisir les comptes, calculer la cadence, sélectionner les contenus, vérifier la preview, puis envoyer.</p>"
+        "</div>"
+        "<div class='hero-status'>"
+        f"<span class='status-pill {'ok' if api_exists else 'warn'}'>{h(api_state)}</span>"
+        f"<span class='status-pill {'warn' if dry_run else 'ok'}'>{h(run_state)}</span>"
+        f"<span class='status-pill neutral'>{h(app_tz)}</span>"
+        "</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_strip(metrics: list[tuple[str, str, str]]) -> None:
+    items = []
+    for label, value, helper in metrics:
+        items.append(
+            "<div class='metric-cell'>"
+            f"<span>{h(label)}</span>"
+            f"<strong>{h(value)}</strong>"
+            f"<small>{h(helper)}</small>"
+            "</div>"
+        )
+    st.markdown("<div class='metric-strip'>" + "".join(items) + "</div>", unsafe_allow_html=True)
+
+
+def render_blocker_chips(blockers: list[str]) -> None:
+    if not blockers:
+        st.success("Envoi débloqué. Dernière vérification recommandée avant action réelle.")
+        return
+    chips = "".join(f"<span>{h(item)}</span>" for item in blockers)
+    st.markdown(
+        "<div class='send-blockers'>"
+        "<strong>Envoi bloqué</strong>"
+        f"<div>{chips}</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_workspace_picker(client: PostoriaClient | None, key_prefix: str) -> int | str | None:
@@ -350,44 +409,228 @@ st.set_page_config(page_title="Postoria Threads Scheduler", layout="wide")
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 1.4rem; max-width: 1280px;}
-    h1 {letter-spacing: 0;}
-    [data-testid="stCaptionContainer"] p {line-height: 1.55;}
+    :root {
+        --bg: #111318;
+        --panel: rgba(244, 246, 251, .042);
+        --panel-strong: rgba(244, 246, 251, .07);
+        --line: rgba(226, 232, 240, .12);
+        --line-strong: rgba(226, 232, 240, .2);
+        --text: rgba(248, 250, 252, .94);
+        --muted: rgba(203, 213, 225, .66);
+        --faint: rgba(148, 163, 184, .48);
+        --accent: #df4d6e;
+        --accent-soft: rgba(223, 77, 110, .13);
+        --success: #2fbf7b;
+        --success-soft: rgba(47, 191, 123, .13);
+        --warn: #e7b958;
+        --warn-soft: rgba(231, 185, 88, .13);
+    }
+    .stApp {
+        background:
+            radial-gradient(circle at 18% 0%, rgba(223, 77, 110, .08), transparent 28rem),
+            linear-gradient(180deg, #141720 0%, var(--bg) 34rem);
+        color: var(--text);
+        font-family: Geist, Satoshi, "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .block-container {padding-top: 1.15rem; max-width: 1360px;}
+    h1, h2, h3 {letter-spacing: 0;}
+    [data-testid="stSidebar"] {
+        background: rgba(12, 14, 19, .72);
+        border-right: 1px solid var(--line);
+    }
+    [data-testid="stCaptionContainer"] p {line-height: 1.55; color: var(--muted);}
     div[data-testid="stMetric"] {
-        border: 1px solid rgba(255,255,255,.12);
+        border: 1px solid var(--line);
         border-radius: 8px;
         padding: 12px 14px;
-        background: rgba(255,255,255,.035);
+        background: var(--panel);
     }
     div[data-testid="stMetric"] label {
-        color: rgba(250,250,250,.72);
+        color: var(--muted);
         font-size: .82rem;
     }
     div[data-testid="stMetricValue"] {
         font-size: 2rem;
+        font-variant-numeric: tabular-nums;
     }
     div[data-testid="stDataFrame"] {
-        border: 1px solid rgba(255,255,255,.10);
+        border: 1px solid var(--line);
         border-radius: 8px;
         overflow: hidden;
     }
+    div[data-testid="stButton"] button, div[data-testid="stFormSubmitButton"] button {
+        border-radius: 8px;
+        border: 1px solid var(--line-strong);
+        transition: transform .22s cubic-bezier(.16, 1, .3, 1), border-color .22s cubic-bezier(.16, 1, .3, 1), background .22s cubic-bezier(.16, 1, .3, 1);
+    }
+    div[data-testid="stButton"] button:hover, div[data-testid="stFormSubmitButton"] button:hover {
+        border-color: rgba(223, 77, 110, .58);
+        background: rgba(223, 77, 110, .09);
+    }
+    div[data-testid="stButton"] button:active, div[data-testid="stFormSubmitButton"] button:active {
+        transform: translateY(1px) scale(.99);
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        border-bottom: 1px solid var(--line);
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px 8px 0 0;
+        padding: 12px 14px;
+    }
+    .app-hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.65fr) minmax(260px, .75fr);
+        gap: 24px;
+        align-items: end;
+        border-bottom: 1px solid var(--line);
+        padding: 12px 0 22px;
+        margin-bottom: 18px;
+    }
+    .app-hero .eyebrow {
+        color: var(--accent);
+        display: inline-block;
+        font-size: .78rem;
+        font-weight: 800;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+        margin-bottom: 10px;
+    }
+    .app-hero h1 {
+        margin: 0;
+        font-size: clamp(2.05rem, 4vw, 3.7rem);
+        line-height: .96;
+        font-weight: 820;
+    }
+    .app-hero p {
+        color: var(--muted);
+        margin: 14px 0 0;
+        max-width: 68ch;
+        line-height: 1.5;
+    }
+    .hero-status {
+        display: flex;
+        justify-content: flex-end;
+        align-items: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+    .status-pill {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 7px 10px;
+        color: var(--muted);
+        background: var(--panel);
+        font-size: .8rem;
+        font-weight: 720;
+        white-space: nowrap;
+    }
+    .status-pill.ok {
+        border-color: rgba(47, 191, 123, .34);
+        color: rgba(211, 250, 229, .92);
+        background: var(--success-soft);
+    }
+    .status-pill.warn {
+        border-color: rgba(231, 185, 88, .34);
+        color: rgba(255, 237, 193, .92);
+        background: var(--warn-soft);
+    }
+    .metric-strip {
+        display: grid;
+        grid-template-columns: 1.15fr .95fr 1.05fr .85fr;
+        gap: 1px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--line);
+        margin: 12px 0 18px;
+    }
+    .metric-cell {
+        background: rgba(17, 19, 24, .76);
+        padding: 14px 16px;
+    }
+    .metric-cell span, .metric-cell small {
+        display: block;
+        color: var(--faint);
+        font-size: .76rem;
+        font-weight: 700;
+        letter-spacing: .055em;
+        text-transform: uppercase;
+    }
+    .metric-cell strong {
+        display: block;
+        color: var(--text);
+        font-size: 1.55rem;
+        margin: 5px 0 3px;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+    }
+    .metric-cell small {
+        color: var(--muted);
+        font-size: .74rem;
+        text-transform: none;
+        letter-spacing: 0;
+        font-weight: 500;
+    }
+    .flow-rail {
+        display: grid;
+        grid-template-columns: 1.2fr .9fr 1.1fr .85fr .85fr;
+        gap: 8px;
+        margin: 8px 0 18px;
+    }
+    .flow-step {
+        position: relative;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 13px 14px 12px;
+        min-height: 82px;
+        background: var(--panel);
+        overflow: hidden;
+        transition: transform .25s cubic-bezier(.16, 1, .3, 1), border-color .25s cubic-bezier(.16, 1, .3, 1);
+    }
+    .flow-step:hover {transform: translateY(-1px); border-color: var(--line-strong);}
+    .flow-step span {
+        display: inline-grid;
+        place-items: center;
+        width: 24px;
+        height: 24px;
+        border-radius: 999px;
+        border: 1px solid var(--line-strong);
+        color: var(--muted);
+        font-size: .76rem;
+        font-weight: 800;
+        margin-bottom: 9px;
+    }
+    .flow-step strong, .flow-step small {display: block;}
+    .flow-step strong {font-size: .94rem;}
+    .flow-step small {color: var(--muted); margin-top: 2px; font-size: .8rem;}
+    .flow-step.is-done {
+        background: linear-gradient(180deg, rgba(47, 191, 123, .12), rgba(244, 246, 251, .035));
+        border-color: rgba(47, 191, 123, .34);
+    }
+    .flow-step.is-done span {
+        color: rgba(211, 250, 229, .95);
+        border-color: rgba(47, 191, 123, .45);
+        background: rgba(47, 191, 123, .16);
+    }
     .step-note {
-        border: 1px solid rgba(255,255,255,.12);
+        border: 1px solid var(--line);
         border-radius: 8px;
         padding: 14px 16px;
-        background: rgba(255,255,255,.035);
+        background: var(--panel);
         min-height: 76px;
     }
     .section-intro {
-        border: 1px solid rgba(255,255,255,.12);
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
         border-radius: 8px;
-        padding: 14px 16px;
+        padding: 16px 18px;
         margin: 10px 0 18px 0;
-        background: rgba(255,255,255,.032);
+        background: linear-gradient(90deg, rgba(244, 246, 251, .05), rgba(244, 246, 251, .018));
     }
     .section-intro span {
         display: inline-block;
-        color: #ff5f7e;
+        color: var(--accent);
         font-size: .78rem;
         font-weight: 700;
         letter-spacing: .08em;
@@ -396,22 +639,103 @@ st.markdown(
     }
     .section-intro strong {
         display: block;
-        font-size: 1.05rem;
+        font-size: 1.12rem;
         margin-bottom: 4px;
     }
     .section-intro p {
-        color: rgba(250,250,250,.68);
+        color: var(--muted);
         margin: 0;
         line-height: 1.45;
     }
-    .warn-copy {color: #ff5f7e; font-weight: 700;}
+    .blocked-panel {
+        border: 1px solid rgba(231, 185, 88, .28);
+        border-radius: 10px;
+        background: linear-gradient(180deg, rgba(231, 185, 88, .10), rgba(244, 246, 251, .035));
+        padding: 16px 18px;
+        margin: 8px 0 18px;
+    }
+    .blocked-panel .blocked-kicker {
+        color: var(--warn);
+        font-size: .75rem;
+        font-weight: 800;
+        letter-spacing: .12em;
+        text-transform: uppercase;
+        margin-bottom: 6px;
+    }
+    .blocked-panel strong {display: block; margin-bottom: 8px;}
+    .blocked-panel ul {margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.55;}
+    .group-strip {
+        display: flex;
+        gap: 10px;
+        overflow-x: auto;
+        padding: 2px 0 14px;
+        margin: 2px 0 10px;
+    }
+    .group-chip {
+        min-width: 176px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 9px 12px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 2px 8px;
+        align-items: center;
+        background: rgba(244, 246, 251, .032);
+    }
+    .group-chip span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 750;
+    }
+    .group-chip b {
+        font-variant-numeric: tabular-nums;
+        color: var(--accent);
+    }
+    .group-chip small {
+        grid-column: 1 / -1;
+        color: var(--faint);
+        font-size: .74rem;
+    }
+    .group-chip.is-active {
+        border-color: rgba(223, 77, 110, .38);
+        background: var(--accent-soft);
+    }
+    .send-blockers {
+        border: 1px solid rgba(223, 77, 110, .28);
+        background: rgba(223, 77, 110, .09);
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin: 10px 0 16px;
+    }
+    .send-blockers strong {
+        display: block;
+        margin-bottom: 9px;
+    }
+    .send-blockers div {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+    .send-blockers span {
+        border: 1px solid rgba(223, 77, 110, .32);
+        border-radius: 999px;
+        padding: 5px 9px;
+        color: rgba(255, 214, 223, .94);
+        background: rgba(17, 19, 24, .35);
+        font-size: .78rem;
+    }
+    .warn-copy {color: var(--accent); font-weight: 700;}
+    @media (max-width: 900px) {
+        .app-hero, .metric-strip, .flow-rail {
+            grid-template-columns: 1fr;
+        }
+        .hero-status {justify-content: flex-start;}
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
-
-st.title("Bulk Threads Scheduler")
-st.caption("Prépare un gros planning Threads: groupes, textes, médias, horaires, preview, puis envoi Postoria.")
 
 with st.sidebar:
     st.header("Configuration")
@@ -447,11 +771,15 @@ posts_ready = selected_posts_count > 0
 preview_ready = len(preview) > 0
 send_ready = preview_ready and api_exists and not dry_run
 
-metric_a, metric_b, metric_c, metric_d = st.columns(4)
-metric_a.metric("Comptes prêts", selected_accounts_count)
-metric_b.metric("Textes prêts", selected_posts_count)
-metric_c.metric("Posts en preview", len(preview))
-metric_d.metric("Médias attachés", sum(1 for p in st.session_state.get("selected_posts", []) if p.get("media_ids")))
+render_app_header(api_exists, dry_run, APP_TZ)
+render_metric_strip(
+    [
+        ("Comptes prêts", str(selected_accounts_count), "sélection depuis groupes"),
+        ("Textes prêts", str(selected_posts_count), "rotation possible"),
+        ("Preview", str(len(preview)), "posts à vérifier"),
+        ("Médias", str(sum(1 for p in st.session_state.get("selected_posts", []) if p.get("media_ids"))), "posts avec photos"),
+    ]
+)
 
 render_flow_status(accounts_ready, cadence_ready, posts_ready, preview_ready, send_ready)
 
@@ -941,6 +1269,16 @@ with tabs[3]:
                     for r in all_scheduled
                 ]
                 calendar(events=events, options={"initialView": "timeGridDay", "height": 700})
+    else:
+        render_locked_step(
+            "Aucune preview générée.",
+            [
+                "Sélectionne les groupes et comptes.",
+                "Valide la cadence.",
+                "Sélectionne les posts et photos.",
+                "Clique sur Générer preview.",
+            ],
+        )
 
 with tabs[4]:
     st.subheader("Envoi Postoria")
@@ -982,8 +1320,7 @@ with tabs[4]:
         send_blockers.append("confirmation DEMARRER manquante")
     can_send = not send_blockers
 
-    if send_blockers:
-        st.warning("Envoi bloqué : " + ", ".join(send_blockers) + ".")
+    render_blocker_chips(send_blockers)
     if st.button("Programmer via Postoria", disabled=not can_send or dry_run):
         if not client or not workspace_id:
             st.error("Client Postoria ou workspace manquant.")
