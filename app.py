@@ -224,6 +224,22 @@ def render_status_counts(rows: list[dict]) -> None:
         col.metric(status.title(), counts.get(status, 0))
 
 
+def is_failed_status(row: dict) -> bool:
+    return any(token in str(row.get("status", "")).lower() for token in ("fail", "error"))
+
+
+def schedule_category_counts(rows: list[dict]) -> dict[str, int]:
+    preview_count = sum(1 for row in rows if str(row.get("status")) == "preview")
+    failed_count = sum(1 for row in rows if is_failed_status(row))
+    planned_count = sum(1 for row in rows if str(row.get("status")) != "preview" and not is_failed_status(row))
+    return {
+        "Preview brouillon": preview_count,
+        "Déjà planifiés": planned_count,
+        "Failed": failed_count,
+        "Tout": len(rows),
+    }
+
+
 def account_status_label(account: dict) -> str:
     if int(account.get("consecutive_failures", 0) or 0) >= 2:
         return "Rate limited"
@@ -619,6 +635,15 @@ def reset_workflow_state(clear_accounts: bool = True, clear_posts: bool = True, 
         for key in list(st.session_state.keys()):
             if key.startswith("account_use_"):
                 st.session_state[key] = False
+
+
+def clear_preview_draft(reason: str | None = None) -> bool:
+    if db.list_scheduled("preview"):
+        db.clear_preview()
+        st.session_state.pop("preview_rows", None)
+        st.session_state["preview_cleared_notice"] = reason or "Preview brouillon supprimée."
+        return True
+    return False
 
 
 def render_group_form(form_key: str, close_on_save: bool = False) -> None:
@@ -1297,6 +1322,8 @@ send_ready = preview_ready and api_exists and not dry_run
 render_app_header(api_exists, dry_run, APP_TZ)
 if st.session_state.get("reset_dialog_mode"):
     render_reset_dialog(str(st.session_state["reset_dialog_mode"]))
+if st.session_state.get("preview_cleared_notice"):
+    st.info(st.session_state.pop("preview_cleared_notice"))
 render_metric_strip(
     [
         ("Comptes prêts", str(selected_accounts_count), "sélection depuis groupes"),
@@ -1821,6 +1848,9 @@ with tabs[2]:
             if uploaded:
                 frame = pd.read_csv(uploaded)
                 added, skipped = db.add_posts(make_post_records(frame))
+                if added:
+                    if clear_preview_draft("Preview brouillon supprimée: nouveaux posts importés. Les posts déjà planifiés restent conservés."):
+                        st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
                 st.success(f"{added} posts ajoutés, {skipped} ignorés/doublons.")
                 posts = db.list_posts(active_only=False)
         with manual_col:
@@ -1844,6 +1874,9 @@ with tabs[2]:
                         if line.strip()
                     ]
                     added, skipped = db.add_posts(records)
+                    if added:
+                        if clear_preview_draft("Preview brouillon supprimée: nouveaux posts ajoutés. Les posts déjà planifiés restent conservés."):
+                            st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
                     st.success(f"{added} posts ajoutés, {skipped} ignorés/doublons.")
                     posts = db.list_posts(active_only=False)
 
@@ -1890,6 +1923,7 @@ with tabs[2]:
                 key="posts_editor",
             )
             if st.button("Tout sélectionner"):
+                clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
                 st.session_state["selected_posts"] = db.list_posts(active_only=True)
                 st.rerun()
             if st.button("Sauver posts/photos"):
@@ -1903,6 +1937,8 @@ with tabs[2]:
                         parse_variables_text(str(row.get("variables", ""))),
                         str(row.get("reply_chain", "")),
                     )
+                if clear_preview_draft("Preview brouillon supprimée: posts/photos modifiés. Les posts déjà planifiés restent conservés."):
+                    st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
                 posts = db.list_posts(active_only=False)
                 st.success("Posts/photos sauvegardés.")
 
@@ -1922,6 +1958,11 @@ with tabs[2]:
                         }
                     )
             st.session_state["selected_posts"] = selected_posts
+            selected_signature = tuple(sorted(int(post["id"]) for post in selected_posts))
+            previous_signature = st.session_state.get("_selected_posts_signature")
+            if previous_signature is not None and previous_signature != selected_signature:
+                clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
+            st.session_state["_selected_posts_signature"] = selected_signature
             if selected_posts:
                 st.success(f"{len(selected_posts)} posts sélectionnés, dont {sum(1 for p in selected_posts if p.get('media_ids'))} avec photo/media.")
                 if len(selected_posts) < int(current["posts_max"]):
@@ -1980,13 +2021,44 @@ with tabs[3]:
 
     all_scheduled = db.list_scheduled()
     if all_scheduled:
-        st.markdown("### Preview & statuts")
+        st.markdown("### Preview, planifiés & failed")
         render_status_counts(all_scheduled)
+        category_counts = schedule_category_counts(all_scheduled)
+        category_labels = [
+            f"Preview brouillon ({category_counts['Preview brouillon']})",
+            f"Déjà planifiés ({category_counts['Déjà planifiés']})",
+            f"Failed ({category_counts['Failed']})",
+            f"Tout ({category_counts['Tout']})",
+        ]
+        category_choice = st.radio(
+            "Catégorie",
+            category_labels,
+            horizontal=True,
+            help="La preview est le brouillon du nouveau lot. Les posts déjà planifiés/envoyés restent dans leur catégorie séparée.",
+        )
+        category = category_choice.split(" (", 1)[0]
+        if category == "Preview brouillon":
+            category_rows = [row for row in all_scheduled if str(row.get("status")) == "preview"]
+        elif category == "Déjà planifiés":
+            category_rows = [
+                row for row in all_scheduled
+                if str(row.get("status")) != "preview" and not is_failed_status(row)
+            ]
+        elif category == "Failed":
+            category_rows = [row for row in all_scheduled if is_failed_status(row)]
+        else:
+            category_rows = all_scheduled
+
         filter_col, list_col = st.columns([1, 3])
-        all_df = scheduled_dataframe(all_scheduled)
-        account_options = ["Tous les comptes"] + sorted(all_df["account_name"].dropna().astype(str).unique().tolist())
-        group_options = ["Tous les groupes"] + sorted(all_df["group_name"].fillna("Sans groupe").astype(str).unique().tolist())
-        status_options = ["Tous"] + sorted(all_df["status"].dropna().astype(str).unique().tolist())
+        all_df = scheduled_dataframe(category_rows)
+        if all_df.empty:
+            account_options = ["Tous les comptes"]
+            group_options = ["Tous les groupes"]
+            status_options = ["Tous"]
+        else:
+            account_options = ["Tous les comptes"] + sorted(all_df["account_name"].dropna().astype(str).unique().tolist())
+            group_options = ["Tous les groupes"] + sorted(all_df["group_name"].fillna("Sans groupe").astype(str).unique().tolist())
+            status_options = ["Tous"] + sorted(all_df["status"].dropna().astype(str).unique().tolist())
         with filter_col:
             st.markdown("#### Filtres")
             status_filter = st.selectbox("Statut", status_options, index=0)
@@ -1997,20 +2069,27 @@ with tabs[3]:
             sort_mode = st.selectbox("Tri", ["Heure", "Compte", "Jour", "Statut"], index=0)
         with list_col:
             query = st.text_input("Rechercher posts, comptes, erreurs", placeholder="Recherche...")
-            filtered = filter_scheduled_rows(all_scheduled, status_filter, date_filter, account_filter, group_filter, query)
-            if view_mode == "Failed":
+            filtered = filter_scheduled_rows(category_rows, status_filter, date_filter, account_filter, group_filter, query)
+            if view_mode == "Failed" and not filtered.empty:
                 filtered = filtered[filtered["status"].astype(str).str.contains("fail|error", case=False, regex=True)]
-            if sort_mode == "Compte":
-                filtered = filtered.sort_values(["account_name", "scheduled_time_local"])
+            if filtered.empty:
+                sorted_filtered = filtered
+            elif sort_mode == "Compte":
+                sorted_filtered = filtered.sort_values(["account_name", "scheduled_time_local"])
             elif sort_mode == "Jour":
-                filtered = filtered.sort_values(["day", "scheduled_time_local", "account_name"])
+                sorted_filtered = filtered.sort_values(["day", "scheduled_time_local", "account_name"])
             elif sort_mode == "Statut":
-                filtered = filtered.sort_values(["status", "scheduled_time_local"])
+                sorted_filtered = filtered.sort_values(["status", "scheduled_time_local"])
             else:
-                filtered = filtered.sort_values(["scheduled_time_local", "account_name"])
+                sorted_filtered = filtered.sort_values(["scheduled_time_local", "account_name"])
+            filtered = sorted_filtered
 
-            st.caption(f"{len(filtered)} posts affichés sur {len(all_scheduled)}")
-            failed_rows = filtered[filtered["status"].astype(str).str.contains("fail|error", case=False, regex=True)]
+            st.caption(f"{len(filtered)} posts affichés sur {len(category_rows)} dans {category}. Total connu: {len(all_scheduled)}.")
+            failed_rows = (
+                filtered[filtered["status"].astype(str).str.contains("fail|error", case=False, regex=True)]
+                if not filtered.empty
+                else filtered
+            )
             if not failed_rows.empty:
                 st.error(f"{len(failed_rows)} posts failed/error. Question: corriger les posts, relancer ces comptes, ou supprimer ces programmations ?")
 
