@@ -29,6 +29,37 @@ def media_ids_text(value) -> str:
     return ", ".join(db.parse_media_ids(value))
 
 
+def threads_profile_url(username: str | None) -> str:
+    raw = str(username or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("http") and "threads." in raw:
+        return raw
+    clean = raw.strip().strip("/").lstrip("@")
+    if "/" in clean:
+        clean = clean.rsplit("/", 1)[-1].lstrip("@")
+    if not clean or " " in clean:
+        return ""
+    return f"https://www.threads.com/@{clean}"
+
+
+def account_threads_url(account: dict) -> str:
+    account_url = str(account.get("url") or "").strip()
+    if "threads." in account_url:
+        return account_url
+    return threads_profile_url(account.get("username") or account.get("name") or account.get("account_name"))
+
+
+def attach_threads_urls(rows: list[dict]) -> list[dict]:
+    account_map = {int(account["id"]): account for account in db.list_accounts()}
+    enriched_rows = []
+    for row in rows:
+        account = account_map.get(int(row.get("account_id", 0) or 0), {})
+        threads_url = account_threads_url(account) or threads_profile_url(row.get("account_name"))
+        enriched_rows.append({**row, "threads_url": threads_url})
+    return enriched_rows
+
+
 def make_post_records(frame: pd.DataFrame) -> list[dict]:
     records: list[dict] = []
     text_column = next((c for c in ("text", "caption") if c in frame.columns), frame.columns[0] if len(frame.columns) else None)
@@ -141,6 +172,7 @@ def scheduled_dataframe(rows: list[dict]) -> pd.DataFrame:
     df.loc[:, "text"] = df["caption"].astype(str).str.slice(0, 140)
     df.loc[:, "error"] = df.get("error", "").fillna("") if "error" in df.columns else ""
     df.loc[:, "replies"] = df.get("chain_replies", []).apply(lambda value: len(value or [])) if "chain_replies" in df.columns else 0
+    df.loc[:, "threads_url"] = df.get("threads_url", "").fillna("") if "threads_url" in df.columns else ""
     return df
 
 
@@ -1665,9 +1697,9 @@ with tabs[0]:
                 status_text = account_status_label({**account, "group_name": selected_group, "active_for_day": int(active_account)})
                 st.markdown(f"<span class='status-text'>{h(status_text)}</span>", unsafe_allow_html=True)
             with row_cols[5]:
-                account_url = account.get("url")
+                account_url = account_threads_url(account) or account.get("url")
                 action_link = (
-                    f"<a href='{h(account_url)}' target='_blank' rel='noreferrer'>Ouvrir</a>"
+                    f"<a href='{h(account_url)}' target='_blank' rel='noreferrer'>Threads</a>"
                     if account_url
                     else "<span>Aucun lien</span>"
                 )
@@ -2019,7 +2051,7 @@ with tabs[3]:
         except Exception as e:
             st.error(str(e))
 
-    all_scheduled = db.list_scheduled()
+    all_scheduled = attach_threads_urls(db.list_scheduled())
     if all_scheduled:
         st.markdown("### Preview, planifiés & failed")
         render_status_counts(all_scheduled)
@@ -2093,23 +2125,26 @@ with tabs[3]:
             if not failed_rows.empty:
                 st.error(f"{len(failed_rows)} posts failed/error. Question: corriger les posts, relancer ces comptes, ou supprimer ces programmations ?")
 
-            visible_cols = ["day", "time", "account_name", "group_name", "status", "photos", "replies", "text", "error"]
+            visible_cols = ["day", "time", "account_name", "threads_url", "group_name", "status", "photos", "replies", "text", "error"]
+            column_config = {
+                "threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir"),
+            }
             if filtered.empty:
                 st.info("Aucun post trouvé avec ces filtres.")
             elif view_mode == "Par compte":
                 for account_name, chunk in filtered.groupby("account_name", sort=True):
                     with st.expander(f"{account_name} - {len(chunk)} posts", expanded=True):
-                        st.dataframe(chunk[visible_cols], use_container_width=True, hide_index=True)
+                        st.dataframe(chunk[visible_cols], use_container_width=True, hide_index=True, column_config=column_config)
             elif view_mode == "Par jour":
                 for day, chunk in filtered.groupby("day", sort=True):
                     with st.expander(f"{day} - {len(chunk)} posts", expanded=True):
-                        st.dataframe(chunk[visible_cols], use_container_width=True, hide_index=True)
+                        st.dataframe(chunk[visible_cols], use_container_width=True, hide_index=True, column_config=column_config)
             elif view_mode == "Par groupe":
                 for group_name, chunk in filtered.groupby("group_name", sort=True):
                     with st.expander(f"{group_name or 'Sans groupe'} - {len(chunk)} posts", expanded=True):
-                        st.dataframe(chunk[visible_cols], use_container_width=True, hide_index=True)
+                        st.dataframe(chunk[visible_cols], use_container_width=True, hide_index=True, column_config=column_config)
             else:
-                st.dataframe(filtered[visible_cols], use_container_width=True, hide_index=True, height=620)
+                st.dataframe(filtered[visible_cols], use_container_width=True, hide_index=True, height=620, column_config=column_config)
 
         if calendar and not all_df.empty:
             with st.expander("Calendrier visuel"):
@@ -2207,34 +2242,28 @@ with tabs[5]:
                     db.update_scheduled_result(row["id"], None, "failed", str(e))
             st.success("Traitement terminé.")
 
-    check_col, delete_col = st.columns(2)
-    with check_col:
-        if st.button("Vérifier statuts Postoria"):
-            if not client or not workspace_id:
-                st.error("Client Postoria ou workspace manquant.")
-            else:
-                for row in db.list_scheduled():
-                    if row.get("postoria_post_id"):
-                        try:
-                            res = client.get_post(int(workspace_id), int(row["postoria_post_id"]))
-                            db.update_scheduled_result(row["id"], row["postoria_post_id"], res.get("status", "unknown"), None)
-                        except Exception as e:
-                            db.update_scheduled_result(row["id"], row["postoria_post_id"], "status_error", str(e))
-                st.success("Statuts mis à jour.")
-    with delete_col:
-        if st.button("Supprimer posts programmés dans Postoria"):
-            if not client or not workspace_id:
-                st.error("Client Postoria ou workspace manquant.")
-            else:
-                for row in db.list_scheduled():
-                    if row.get("postoria_post_id"):
-                        try:
-                            client.delete_post(int(workspace_id), int(row["postoria_post_id"]))
-                            db.update_scheduled_result(row["id"], row["postoria_post_id"], "deleted", None)
-                        except Exception as e:
-                            db.update_scheduled_result(row["id"], row["postoria_post_id"], "delete_error", str(e))
-                st.success("Suppression terminée.")
+    if st.button("Vérifier statuts Postoria"):
+        if not client or not workspace_id:
+            st.error("Client Postoria ou workspace manquant.")
+        else:
+            checked = 0
+            for row in db.list_scheduled():
+                if row.get("postoria_post_id"):
+                    try:
+                        res = client.get_post(int(workspace_id), int(row["postoria_post_id"]))
+                        db.update_scheduled_result(row["id"], row["postoria_post_id"], res.get("status", "unknown"), None)
+                        checked += 1
+                    except Exception as e:
+                        db.update_scheduled_result(row["id"], row["postoria_post_id"], "status_error", str(e))
+            st.success(f"Statuts mis à jour pour {checked} posts Postoria.")
 
-    scheduled = db.list_scheduled()
+    st.caption("Aucune suppression Postoria n'est disponible dans cette app. Les posts envoyés restent conservés côté Postoria.")
+
+    scheduled = attach_threads_urls(db.list_scheduled())
     if scheduled:
-        st.dataframe(pd.DataFrame(scheduled), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(scheduled),
+            use_container_width=True,
+            hide_index=True,
+            column_config={"threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir")},
+        )

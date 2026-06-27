@@ -71,6 +71,3 @@ class PostoriaClient:
 
     def get_post(self, workspace_id: int, post_id: int) -> dict:
         return self._request("GET", f"/workspaces/{workspace_id}/posts/{post_id}")
-
-    def delete_post(self, workspace_id: int, post_id: int) -> None:
-        self._request("DELETE", f"/workspaces/{workspace_id}/posts/{post_id}")
