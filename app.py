@@ -1035,6 +1035,35 @@ st.markdown(
         border-color: rgba(223, 77, 110, .45);
         background: rgba(223, 77, 110, .08);
     }
+    .account-selection-summary {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--line);
+        margin: 10px 0 12px;
+    }
+    .account-selection-summary div {
+        background: rgba(17, 19, 24, .66);
+        padding: 11px 13px;
+    }
+    .account-selection-summary span {
+        display: block;
+        color: var(--faint);
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+    .account-selection-summary strong {
+        display: block;
+        margin-top: 3px;
+        color: var(--text);
+        font-size: 1.12rem;
+        font-variant-numeric: tabular-nums;
+    }
     .mobile-account-card {
         display: none;
     }
@@ -1053,6 +1082,9 @@ st.markdown(
         }
         .account-table-head, .desktop-account-row {
             display: none;
+        }
+        .account-selection-summary {
+            grid-template-columns: 1fr;
         }
         .mobile-account-card {
             display: block;
@@ -1206,6 +1238,10 @@ with tabs[0]:
             account_id = int(account["id"])
             st.session_state.setdefault(f"account_group_{account_id}", account.get("group_name") or "tous")
             st.session_state.setdefault(f"account_active_{account_id}", bool(account.get("active_for_day", 1)))
+            st.session_state.setdefault(
+                f"account_status_{account_id}",
+                "Active" if bool(st.session_state.get(f"account_active_{account_id}", True)) else "Paused",
+            )
             st.session_state.setdefault(f"account_use_{account_id}", False)
 
         top_a, top_b, top_c = st.columns([1.15, 1.15, .65])
@@ -1235,14 +1271,42 @@ with tabs[0]:
         with top_c:
             st.markdown(f"<div class='accounts-count'>{len(visible_accounts)} of {len(accounts)}</div>", unsafe_allow_html=True)
 
-        action_a, action_b, _ = st.columns([.65, .65, 2.7])
-        if action_a.button("Sélectionner visibles"):
+        selected_total = sum(1 for account in accounts if st.session_state.get(f"account_use_{int(account['id'])}", False))
+        selected_visible = sum(1 for account in visible_accounts if st.session_state.get(f"account_use_{int(account['id'])}", False))
+        paused_visible = sum(1 for account in visible_accounts if not st.session_state.get(f"account_active_{int(account['id'])}", True))
+        st.markdown(
+            "<div class='account-selection-summary'>"
+            f"<div><span>Sélection totale</span><strong>{selected_total}</strong></div>"
+            f"<div><span>Dans la vue</span><strong>{selected_visible}/{len(visible_accounts)}</strong></div>"
+            f"<div><span>Paused visibles</span><strong>{paused_visible}</strong></div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        action_a, action_b, _ = st.columns([1.15, .75, 2.1])
+        with action_a:
+            bulk_action = st.selectbox(
+                "Action groupée",
+                [
+                    "Sélectionner visibles",
+                    "Désélectionner visibles",
+                    "Mettre visibles en Active",
+                    "Mettre visibles en Paused",
+                ],
+            )
+        if action_b.button("Appliquer", disabled=not visible_accounts):
             for account in visible_accounts:
-                st.session_state[f"account_use_{int(account['id'])}"] = True
-            st.rerun()
-        if action_b.button("Désélectionner visibles"):
-            for account in visible_accounts:
-                st.session_state[f"account_use_{int(account['id'])}"] = False
+                account_id = int(account["id"])
+                if bulk_action == "Sélectionner visibles":
+                    st.session_state[f"account_use_{account_id}"] = True
+                elif bulk_action == "Désélectionner visibles":
+                    st.session_state[f"account_use_{account_id}"] = False
+                elif bulk_action == "Mettre visibles en Active":
+                    st.session_state[f"account_active_{account_id}"] = True
+                    st.session_state[f"account_status_{account_id}"] = "Active"
+                elif bulk_action == "Mettre visibles en Paused":
+                    st.session_state[f"account_active_{account_id}"] = False
+                    st.session_state[f"account_status_{account_id}"] = "Paused"
             st.rerun()
 
         st.markdown(
@@ -1301,11 +1365,16 @@ with tabs[0]:
                     unsafe_allow_html=True,
                 )
             with row_cols[4]:
-                active_account = st.toggle(
-                    f"Actif {account_id}",
-                    key=f"account_active_{account_id}",
+                active_before = bool(st.session_state.get(f"account_active_{account_id}", bool(account.get("active_for_day", 1))))
+                status_choice = st.selectbox(
+                    f"Statut {account_id}",
+                    ["Active", "Paused"],
+                    index=0 if active_before else 1,
+                    key=f"account_status_{account_id}",
                     label_visibility="collapsed",
                 )
+                active_account = status_choice == "Active"
+                st.session_state[f"account_active_{account_id}"] = active_account
                 status_text = account_status_label({**account, "group_name": selected_group, "active_for_day": int(active_account)})
                 st.markdown(f"<span class='status-text'>{h(status_text)}</span>", unsafe_allow_html=True)
             with row_cols[5]:
