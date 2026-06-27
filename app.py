@@ -351,6 +351,10 @@ def h(value) -> str:
     return escape(str(value or ""), quote=True)
 
 
+def widget_slug(value: str) -> str:
+    return "".join(char.lower() if char.isalnum() else "_" for char in str(value or "item")).strip("_") or "item"
+
+
 def render_locked_step(title: str, blockers: list[str]) -> None:
     items = "".join(f"<li>{h(blocker)}</li>" for blocker in blockers)
     st.markdown(
@@ -1349,35 +1353,37 @@ with tabs[0]:
         st.markdown("#### Groupes")
         groups = db.list_groups()
         group_color_by_name = {group["name"]: group.get("color") for group in groups}
-        if st.button("Créer un groupe"):
+        group_options = [g["name"] for g in groups] or ["tous"]
+        group_accounts_by_name = {
+            group_name: [
+                account for account in accounts
+                if (account.get("group_name") or "tous") == group_name
+            ]
+            for group_name in group_options
+        }
+
+        st.markdown("#### Sélection rapide")
+        preset_a, preset_b, preset_c = st.columns([1, 1, 1])
+        if preset_a.button("Tous les comptes actifs"):
+            st.session_state["selected_group_filters"] = group_options
+            st.session_state.pop("_account_group_signature", None)
+            for account in accounts:
+                account_id = int(account["id"])
+                st.session_state[f"account_use_{account_id}"] = bool(account.get("active_for_day", 1))
+            st.rerun()
+        if preset_b.button("Vider la sélection"):
+            st.session_state["selected_group_filters"] = []
+            st.session_state.pop("_account_group_signature", None)
+            for account in accounts:
+                st.session_state[f"account_use_{int(account['id'])}"] = False
+            st.rerun()
+        if preset_c.button("Créer un groupe rapide"):
             st.session_state["show_group_dialog"] = True
+            st.rerun()
         if st.session_state.get("show_group_dialog"):
             render_create_group_dialog()
-        group_options = [g["name"] for g in groups] or ["tous"]
-        selected_group_filters = st.multiselect(
-            "Groupes à utiliser",
-            options=group_options,
-            default=st.session_state.get("selected_group_filters", []),
-            key="selected_group_filters",
-            help="Choisir un groupe ajoute tous ses comptes. Tu peux décocher un compte ensuite.",
-        )
-        render_group_cards(groups, st.session_state.get("grouped_accounts", {}))
-        if selected_group_filters:
-            st.markdown("#### Comptes dans les groupes sélectionnés")
-            for group_name in selected_group_filters:
-                group_accounts = [
-                    account for account in accounts
-                    if (account.get("group_name") or "tous") == group_name
-                ]
-                labels = [account_label(account) for account in group_accounts]
-                with st.expander(f"{group_name} · {len(group_accounts)} comptes", expanded=True):
-                    st.write(", ".join(labels) if labels else "Aucun compte dans ce groupe.")
-        else:
-            st.info("Sélectionne un ou plusieurs groupes pour commencer.")
 
-        st.markdown("#### Ajuster les comptes")
-        st.caption("Les groupes remplissent la sélection. Le tableau sert à chercher, filtrer, décocher, mettre en pause ou changer un groupe.")
-
+        selected_group_filters = st.session_state.get("selected_group_filters", [])
         group_signature = tuple(selected_group_filters)
         if st.session_state.get("_account_group_signature") != group_signature:
             for account in accounts:
@@ -1385,6 +1391,62 @@ with tabs[0]:
                 group_name = account.get("group_name") or "tous"
                 st.session_state[f"account_use_{account_id}"] = bool(account.get("active_for_day", 1)) and group_name in selected_group_filters
             st.session_state["_account_group_signature"] = group_signature
+
+        group_cols = st.columns(min(3, max(1, len(groups))))
+        for idx, group in enumerate(groups):
+            group_name = group["name"]
+            group_accounts = group_accounts_by_name.get(group_name, [])
+            selected_in_group = sum(
+                1 for account in group_accounts
+                if st.session_state.get(f"account_use_{int(account['id'])}", False)
+            )
+            with group_cols[idx % len(group_cols)]:
+                st.markdown(
+                    "<div class='step-note'>"
+                    f"{render_group_badge(group_name, group.get('color'))}<br>"
+                    f"<b>{selected_in_group}/{len(group_accounts)}</b> comptes sélectionnés"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                take_col, remove_col = st.columns(2)
+                group_key = f"{idx}_{widget_slug(group_name)}"
+                if take_col.button("Prendre", key=f"take_group_{group_key}", disabled=not group_accounts):
+                    selected = set(st.session_state.get("selected_group_filters", []))
+                    selected.add(group_name)
+                    st.session_state["selected_group_filters"] = [name for name in group_options if name in selected]
+                    st.session_state.pop("_account_group_signature", None)
+                    st.rerun()
+                if remove_col.button("Retirer", key=f"remove_group_{group_key}", disabled=not group_accounts):
+                    selected = [name for name in st.session_state.get("selected_group_filters", []) if name != group_name]
+                    st.session_state["selected_group_filters"] = selected
+                    st.session_state.pop("_account_group_signature", None)
+                    st.rerun()
+
+        with st.expander("Sélection avancée"):
+            advanced_groups = st.multiselect(
+                "Groupes à utiliser",
+                options=group_options,
+                default=st.session_state.get("selected_group_filters", []),
+                help="Choisir un groupe ajoute tous ses comptes. Tu peux décocher un compte ensuite.",
+            )
+            if advanced_groups != st.session_state.get("selected_group_filters", []):
+                st.session_state["selected_group_filters"] = advanced_groups
+                st.session_state.pop("_account_group_signature", None)
+                st.rerun()
+
+        selected_group_filters = st.session_state.get("selected_group_filters", [])
+        render_group_cards(groups, st.session_state.get("grouped_accounts", {}))
+        if selected_group_filters:
+            selected_labels = []
+            for group_name in selected_group_filters:
+                group_accounts = group_accounts_by_name.get(group_name, [])
+                selected_labels.append(f"{group_name} ({len(group_accounts)})")
+            st.caption("Groupes retenus : " + ", ".join(selected_labels))
+        else:
+            st.info("Prends un groupe ou choisis tous les comptes actifs pour commencer.")
+
+        st.markdown("#### Ajuster les comptes")
+        st.caption("Les groupes remplissent la sélection. Le tableau sert à chercher, filtrer, décocher, mettre en pause ou changer un groupe.")
 
         for account in accounts:
             account_id = int(account["id"])
@@ -1492,6 +1554,17 @@ with tabs[0]:
                     st.caption(f"+ {len(selected_accounts_preview) - 18} autres comptes sélectionnés.")
             else:
                 st.caption("Aucun compte sélectionné pour l'instant.")
+
+        continue_left, continue_right = st.columns([2, 1])
+        with continue_left:
+            if selected_accounts_preview:
+                st.caption("Sélection prête. Tu peux encore ajuster un compte dans le tableau, ou passer à la cadence.")
+            else:
+                st.caption("Prends au moins un groupe ou sélectionne des comptes avant de continuer.")
+        with continue_right:
+            if st.button("Continuer vers Cadence", type="primary", disabled=not selected_accounts_preview):
+                st.session_state["account_step_done"] = True
+                st.success("Comptes validés. Ouvre l'onglet 2. Cadence pour régler le volume et les horaires.")
 
         st.markdown(
             "<div class='accounts-shell-lite'>"
