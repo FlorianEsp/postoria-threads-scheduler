@@ -31,6 +31,36 @@ def account_variables(account: dict, group_name: str) -> dict:
     }
 
 
+def balanced_random_offsets(
+    count: int,
+    available_minutes: int,
+    min_interval_minutes: int,
+    rng: random.Random,
+    global_minute_load: dict[int, int],
+) -> list[int]:
+    if count == 1:
+        candidates = range(0, available_minutes + 1)
+        return [min(candidates, key=lambda minute: (global_minute_load.get(minute, 0), rng.random()))]
+
+    required = (count - 1) * min_interval_minutes
+    slack = max(0, available_minutes - required)
+    best_offsets: list[int] | None = None
+    best_score: tuple[int, int, float] | None = None
+
+    attempts = max(40, count * 12)
+    for _ in range(attempts):
+        jitters = sorted(rng.randint(0, slack) for _ in range(count))
+        offsets = [slot * min_interval_minutes + jitters[slot] for slot in range(count)]
+        load_score = sum(global_minute_load.get(minute, 0) for minute in offsets)
+        peak_score = max((global_minute_load.get(minute, 0) for minute in offsets), default=0)
+        score = (peak_score, load_score, rng.random())
+        if best_score is None or score < best_score:
+            best_score = score
+            best_offsets = offsets
+
+    return best_offsets or [slot * min_interval_minutes for slot in range(count)]
+
+
 def generate_schedule(
     selected_posts: list[dict],
     grouped_accounts: dict[str, dict],
@@ -71,20 +101,19 @@ def generate_schedule(
 
     rows: list[dict] = []
     caption_times: dict[str, list[datetime]] = {}
+    global_minute_load: dict[int, int] = {}
     post_count = len(selected_posts)
-    group_index = 0
+    account_serial = 0
     rng = random.Random(schedule_seed or int(datetime.now().timestamp()))
     media_library = media_library or {}
 
     for group_name, group in grouped_accounts.items():
         accounts = group.get("accounts", [])
-        offset_minutes = int(group.get("offset_minutes", 0))
-        strategy_offset = group_index * 7
 
         for account_index, account in enumerate(accounts):
             account_used_hashes: set[str] = set()
             allow_account_reuse = post_count < max_posts
-            account_start = start_dt + timedelta(minutes=offset_minutes + account_index * 3)
+            account_start = start_dt
             account_post_count = min_posts if min_posts == max_posts else rng.randint(min_posts, max_posts)
             account_posts = list(selected_posts)
             if randomize_captions:
@@ -96,13 +125,14 @@ def generate_schedule(
                     f"Impossible de placer {account_post_count} posts pour {account.get('name')} "
                     f"avec {min_interval_minutes} min d'écart dans cette plage."
                 )
-            slack = max(0, account_available - account_required)
             if randomize_times and account_post_count > 1:
-                jitters = sorted(rng.randint(0, slack) for _ in range(account_post_count))
-                minute_offsets = [
-                    slot * min_interval_minutes + jitters[slot]
-                    for slot in range(account_post_count)
-                ]
+                minute_offsets = balanced_random_offsets(
+                    account_post_count,
+                    account_available,
+                    min_interval_minutes,
+                    rng,
+                    global_minute_load,
+                )
             else:
                 minute_offsets = [slot * min_interval_minutes for slot in range(account_post_count)]
 
@@ -113,7 +143,7 @@ def generate_schedule(
 
                 chosen = None
                 for attempt in range(post_count):
-                    idx = (slot + account_index + strategy_offset + attempt) % post_count
+                    idx = (slot + account_serial * 7 + attempt) % post_count
                     post = account_posts[idx]
                     h = post.get("caption_hash") or caption_hash(post["caption"])
                     if h in account_used_hashes and not allow_account_reuse:
@@ -131,13 +161,14 @@ def generate_schedule(
 
                 if chosen is None:
                     raise ValueError(
-                        "Pas assez de captions pour respecter la règle anti-répétition de 60 minutes. "
+                        f"Pas assez de captions pour respecter la règle anti-répétition de {same_caption_margin_minutes} minutes. "
                         "Ajoute plus de posts, réduis le nombre de comptes/posts, ou augmente le timeframe."
                     )
 
                 h = chosen["caption_hash"]
                 account_used_hashes.add(h)
                 caption_times.setdefault(h, []).append(scheduled_at)
+                global_minute_load[minute_offsets[slot]] = global_minute_load.get(minute_offsets[slot], 0) + 1
                 utc_dt = scheduled_at.astimezone(ZoneInfo("UTC"))
                 media_ids = chosen.get("media_ids") or []
                 media_folder = str(chosen.get("media_folder") or "").strip()
@@ -168,6 +199,6 @@ def generate_schedule(
                     "scheduled_time_utc": utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 })
 
-        group_index += 1
+            account_serial += 1
 
     return sorted(rows, key=lambda r: r["scheduled_time_utc"])

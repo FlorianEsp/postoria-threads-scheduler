@@ -117,7 +117,7 @@ def build_grouped_accounts(accounts: list[dict], edited: pd.DataFrame) -> dict[s
         db.update_account_preferences(int(account["id"]), group_name, bool(row["active"]))
         if not bool(row["use"]) or not bool(row["active"]):
             continue
-        grouped.setdefault(group_name, {"offset_minutes": len(grouped) * 10, "accounts": []})
+        grouped.setdefault(group_name, {"accounts": []})
         grouped[group_name]["accounts"].append({**account, "group_name": group_name})
     return grouped
 
@@ -238,7 +238,21 @@ def account_initials(account: dict) -> str:
     return "".join(part[0].upper() for part in parts[:2])[:2]
 
 
-def group_color(group_name: str) -> tuple[str, str]:
+GROUP_COLOR_CHOICES = [
+    ("Violet", "#8b5cf6", "rgba(139, 92, 246, .16)"),
+    ("Red", "#ef4444", "rgba(239, 68, 68, .14)"),
+    ("Slate", "#64748b", "rgba(100, 116, 139, .16)"),
+    ("Green", "#2fbf7b", "rgba(47, 191, 123, .14)"),
+    ("Gold", "#e7b958", "rgba(231, 185, 88, .14)"),
+    ("Blue", "#3b82f6", "rgba(59, 130, 246, .14)"),
+]
+
+
+def group_color(group_name: str, color_override: str | None = None) -> tuple[str, str]:
+    if color_override:
+        for _, dot, bg in GROUP_COLOR_CHOICES:
+            if dot.lower() == str(color_override).lower():
+                return dot, bg
     palette = [
         ("#8b5cf6", "rgba(139, 92, 246, .16)"),
         ("#ef4444", "rgba(239, 68, 68, .14)"),
@@ -250,8 +264,8 @@ def group_color(group_name: str) -> tuple[str, str]:
     return palette[index]
 
 
-def render_group_badge(group_name: str) -> str:
-    dot, bg = group_color(group_name)
+def render_group_badge(group_name: str, color_override: str | None = None) -> str:
+    dot, bg = group_color(group_name, color_override)
     return (
         f"<span class='account-group-badge' style='background:{bg}; color:{dot};'>"
         f"<i style='background:{dot};'></i>{h(group_name)}</span>"
@@ -315,7 +329,8 @@ def distribution_sentence(current: dict) -> str:
     return (
         f"Chaque compte reçoit {count} posts répartis entre "
         f"{current['start_time'].strftime('%H:%M')} et {current['end_time'].strftime('%H:%M')}. "
-        f"Chaque post garde au moins {current['min_interval']}min d'écart avec le post précédent du même compte."
+        f"Chaque post garde au moins {current['min_interval']}min d'écart avec le post précédent du même compte. "
+        "Les minutes sont randomisées par compte pour éviter que tous les comptes partent au même moment."
     )
 
 
@@ -358,9 +373,10 @@ def render_group_cards(groups: list[dict], grouped: dict[str, dict] | None = Non
         name = group["name"]
         selected_count = len(grouped.get(name, {}).get("accounts", []))
         state = "is-active" if selected_count else ""
+        dot, bg = group_color(name, group.get("color"))
         chips.append(
-            f"<div class='group-chip {state}'>"
-            f"<span>{h(name)}</span>"
+            f"<div class='group-chip {state}' style='background:{bg};'>"
+            f"<span><i style='background:{dot};'></i>{h(name)}</span>"
             f"<b>{selected_count}</b>"
             f"<small>{int(group.get('account_count', 0) or 0)} assignés</small>"
             "</div>"
@@ -583,6 +599,92 @@ def render_workspace_picker(client: PostoriaClient | None, key_prefix: str) -> i
     )
     st.session_state["workspace_id"] = picked_workspace
     return picked_workspace
+
+
+def reset_workflow_state(clear_accounts: bool = True, clear_posts: bool = True, clear_preview: bool = True) -> None:
+    if clear_preview:
+        db.clear_preview()
+        st.session_state.pop("preview_rows", None)
+    if clear_posts:
+        st.session_state["selected_posts"] = []
+    if clear_accounts:
+        st.session_state["selected_accounts"] = []
+        st.session_state["grouped_accounts"] = {}
+        st.session_state["selected_group_filters"] = []
+        st.session_state.pop("_account_group_signature", None)
+        for key in list(st.session_state.keys()):
+            if key.startswith("account_use_"):
+                st.session_state[key] = False
+
+
+def render_group_form(form_key: str, close_on_save: bool = False) -> None:
+    name = st.text_input("Nom du groupe", placeholder="ex: w-u, tous, group 5 post", key=f"{form_key}_name")
+    color_labels = [label for label, _, _ in GROUP_COLOR_CHOICES]
+    color_label = st.radio("Couleur", color_labels, horizontal=True, key=f"{form_key}_color_label")
+    color = next(dot for label, dot, _ in GROUP_COLOR_CHOICES if label == color_label)
+    st.markdown(
+        "<div class='group-color-preview'>"
+        + "".join(
+            f"<span style='background:{dot}; opacity:{'1' if dot == color else '.28'}'></span>"
+            for _, dot, _ in GROUP_COLOR_CHOICES
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    if st.button("Créer le groupe", disabled=not name.strip(), key=f"{form_key}_save"):
+        created = db.upsert_group(name, color=color)
+        st.success("Groupe créé." if created else "Groupe mis à jour.")
+        if close_on_save:
+            st.session_state["show_group_dialog"] = False
+        st.rerun()
+
+
+def render_create_group_dialog() -> None:
+    if hasattr(st, "dialog"):
+        @st.dialog("Créer un groupe")
+        def _dialog() -> None:
+            render_group_form("dialog_group", close_on_save=True)
+
+        _dialog()
+    else:
+        with st.expander("Créer un groupe", expanded=True):
+            render_group_form("inline_group", close_on_save=False)
+
+
+def render_reset_dialog(mode: str) -> None:
+    full_reset = mode == "all"
+    title = "Recommencer tout" if full_reset else "Recommencer la planification"
+    body = (
+        "Vide la sélection de comptes, la sélection de posts et la preview brouillon. "
+        "Les comptes, groupes, posts importés et posts déjà programmés/envoyés restent en base."
+        if full_reset
+        else "Efface seulement la preview brouillon. Les comptes, posts sélectionnés et posts déjà programmés/envoyés restent en place."
+    )
+
+    def _content() -> None:
+        st.write(body)
+        left, right = st.columns(2)
+        if left.button("Annuler", key=f"cancel_reset_{mode}"):
+            st.session_state.pop("reset_dialog_mode", None)
+            st.rerun()
+        if right.button("Confirmer", key=f"confirm_reset_{mode}", type="primary"):
+            reset_workflow_state(
+                clear_accounts=full_reset,
+                clear_posts=full_reset,
+                clear_preview=True,
+            )
+            st.session_state.pop("reset_dialog_mode", None)
+            st.rerun()
+
+    if hasattr(st, "dialog"):
+        @st.dialog(title)
+        def _dialog() -> None:
+            _content()
+
+        _dialog()
+    else:
+        with st.expander(title, expanded=True):
+            _content()
 
 
 st.set_page_config(page_title="Postoria Threads Scheduler", layout="wide")
@@ -863,10 +965,19 @@ st.markdown(
         background: rgba(244, 246, 251, .032);
     }
     .group-chip span {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
         font-weight: 750;
+    }
+    .group-chip span i {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        flex: 0 0 auto;
     }
     .group-chip b {
         font-variant-numeric: tabular-nums;
@@ -1064,6 +1175,46 @@ st.markdown(
         font-size: 1.12rem;
         font-variant-numeric: tabular-nums;
     }
+    .selected-panel {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(17, 19, 24, .58);
+        padding: 13px;
+        position: sticky;
+        top: 12px;
+    }
+    .selected-panel h4 {
+        margin: 0 0 10px;
+        font-size: .9rem;
+    }
+    .selected-account-chip {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        border-top: 1px solid var(--line);
+        padding: 9px 0;
+        color: var(--muted);
+        font-size: .82rem;
+    }
+    .selected-account-chip strong {
+        display: block;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .group-color-preview {
+        display: flex;
+        gap: 8px;
+        margin: 4px 0 12px;
+    }
+    .group-color-preview span {
+        width: 22px;
+        height: 22px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,.18);
+    }
     .mobile-account-card {
         display: none;
     }
@@ -1111,6 +1262,12 @@ with st.sidebar:
     st.write("4. Vérifier la preview")
     st.write("5. Lire les analytics")
     st.write("6. Confirmer l'envoi")
+    st.divider()
+    st.write("Recommencer")
+    if st.button("Recommencer planning"):
+        st.session_state["reset_dialog_mode"] = "planning"
+    if st.button("Recommencer tout"):
+        st.session_state["reset_dialog_mode"] = "all"
 
 client = None
 if api_exists:
@@ -1134,6 +1291,8 @@ analytics_ready = len(db.list_scheduled()) > 0
 send_ready = preview_ready and api_exists and not dry_run
 
 render_app_header(api_exists, dry_run, APP_TZ)
+if st.session_state.get("reset_dialog_mode"):
+    render_reset_dialog(str(st.session_state["reset_dialog_mode"]))
 render_metric_strip(
     [
         ("Comptes prêts", str(selected_accounts_count), "sélection depuis groupes"),
@@ -1188,19 +1347,12 @@ with tabs[0]:
         st.info("Aucun compte local. Charge les comptes Postoria d'abord.")
     else:
         st.markdown("#### Groupes")
-        create_col, offset_col, button_col = st.columns([2, 1, 1])
-        with create_col:
-            new_group_name = st.text_input("Créer un groupe", placeholder="ex: w-u, group 5 post")
-        with offset_col:
-            new_group_offset = st.number_input("Offset min", min_value=0, max_value=1440, value=0, step=5)
-        with button_col:
-            st.write("")
-            st.write("")
-            if st.button("Ajouter groupe", disabled=not new_group_name.strip()):
-                created = db.upsert_group(new_group_name, int(new_group_offset))
-                st.success("Groupe créé." if created else "Groupe mis à jour.")
-
         groups = db.list_groups()
+        group_color_by_name = {group["name"]: group.get("color") for group in groups}
+        if st.button("Créer un groupe"):
+            st.session_state["show_group_dialog"] = True
+        if st.session_state.get("show_group_dialog"):
+            render_create_group_dialog()
         group_options = [g["name"] for g in groups] or ["tous"]
         selected_group_filters = st.multiselect(
             "Groupes à utiliser",
@@ -1309,6 +1461,38 @@ with tabs[0]:
                     st.session_state[f"account_status_{account_id}"] = "Paused"
             st.rerun()
 
+        selected_accounts_preview = [
+            account for account in accounts
+            if st.session_state.get(f"account_use_{int(account['id'])}", False)
+        ]
+        with st.container(border=True):
+            header_left, header_right = st.columns([2, 1])
+            with header_left:
+                st.markdown(f"**Comptes sélectionnés · {len(selected_accounts_preview)}**")
+            with header_right:
+                if st.button("Vider sélection", disabled=not selected_accounts_preview):
+                    for account in selected_accounts_preview:
+                        st.session_state[f"account_use_{int(account['id'])}"] = False
+                    st.rerun()
+            if selected_accounts_preview:
+                preview_cols = st.columns(3)
+                for idx, account in enumerate(selected_accounts_preview[:18]):
+                    account_id = int(account["id"])
+                    group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
+                    with preview_cols[idx % 3]:
+                        st.markdown(
+                            f"**{h(account_label(account))}**  \n"
+                            f"{render_group_badge(group_name, group_color_by_name.get(group_name))}",
+                            unsafe_allow_html=True,
+                        )
+                        if st.button("Retirer", key=f"remove_selected_{account_id}"):
+                            st.session_state[f"account_use_{account_id}"] = False
+                            st.rerun()
+                if len(selected_accounts_preview) > 18:
+                    st.caption(f"+ {len(selected_accounts_preview) - 18} autres comptes sélectionnés.")
+            else:
+                st.caption("Aucun compte sélectionné pour l'instant.")
+
         st.markdown(
             "<div class='accounts-shell-lite'>"
             "<div class='account-table-head'>"
@@ -1358,7 +1542,10 @@ with tabs[0]:
                     key=f"account_group_{account_id}",
                     label_visibility="collapsed",
                 )
-                st.markdown(render_group_badge(selected_group), unsafe_allow_html=True)
+                st.markdown(
+                    render_group_badge(selected_group, group_color_by_name.get(selected_group)),
+                    unsafe_allow_html=True,
+                )
             with row_cols[3]:
                 st.markdown(
                     f"<span class='next-post-pill'>{h(next_by_account.get(account_id, '-'))}</span>",

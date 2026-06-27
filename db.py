@@ -140,6 +140,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 offset_minutes INTEGER DEFAULT 0,
+                color TEXT DEFAULT '#8b5cf6',
                 strategy TEXT DEFAULT 'default'
             );
 
@@ -186,6 +187,7 @@ def init_db() -> None:
         _ensure_column(conn, "accounts", "username", "TEXT")
         _ensure_column(conn, "accounts", "avatar_url", "TEXT")
         _ensure_column(conn, "accounts", "group_name", "TEXT DEFAULT 'tous'")
+        _ensure_column(conn, "account_groups", "color", "TEXT DEFAULT '#8b5cf6'")
         _ensure_column(conn, "scheduled_posts", "media_ids", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "content_type", "TEXT DEFAULT 'text'")
         _ensure_column(conn, "scheduled_posts", "variables_json", "TEXT DEFAULT ''")
@@ -328,31 +330,32 @@ def list_groups() -> list[dict[str, Any]]:
             dict(r)
             for r in conn.execute(
                 """
-                SELECT g.name, g.offset_minutes, COUNT(a.id) AS account_count
+                SELECT g.name, g.offset_minutes, g.color, COUNT(a.id) AS account_count
                 FROM account_groups g
                 LEFT JOIN accounts a ON COALESCE(NULLIF(a.group_name, ''), 'tous') = g.name
-                GROUP BY g.id, g.name, g.offset_minutes
+                GROUP BY g.id, g.name, g.offset_minutes, g.color
                 ORDER BY g.name COLLATE NOCASE
                 """
             ).fetchall()
         ]
 
 
-def upsert_group(name: str, offset_minutes: int = 0) -> bool:
+def upsert_group(name: str, offset_minutes: int = 0, color: str = "#8b5cf6") -> bool:
     clean_name = str(name or "").strip()
     if not clean_name:
         return False
+    clean_color = str(color or "#8b5cf6").strip()
     with connect() as conn:
         try:
             conn.execute(
-                "INSERT INTO account_groups (name, offset_minutes) VALUES (?, ?)",
-                (clean_name, int(offset_minutes)),
+                "INSERT INTO account_groups (name, offset_minutes, color) VALUES (?, ?, ?)",
+                (clean_name, int(offset_minutes), clean_color),
             )
             return True
         except sqlite3.IntegrityError:
             conn.execute(
-                "UPDATE account_groups SET offset_minutes=? WHERE name=?",
-                (int(offset_minutes), clean_name),
+                "UPDATE account_groups SET color=? WHERE name=?",
+                (clean_color, clean_name),
             )
             return False
 
@@ -409,6 +412,11 @@ def save_preview(rows: list[dict[str, Any]]) -> None:
                     serialize_json_map(r.get("variables", {})), serialize_lines(r.get("chain_replies", []))
                 ),
             )
+
+
+def clear_preview() -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM scheduled_posts WHERE status = 'preview'")
 
 
 def update_scheduled_result(local_id: int, postoria_post_id: int | None, status: str, error: str | None = None) -> None:
