@@ -111,10 +111,12 @@ def build_grouped_accounts(accounts: list[dict], edited: pd.DataFrame) -> dict[s
     grouped: dict[str, dict] = {}
     for account in accounts:
         row = edited_by_id.get(int(account["id"]))
-        if row is None or not bool(row["use"]) or not bool(row["active"]):
+        if row is None:
             continue
         group_name = str(row["group"] or "tous").strip()
         db.update_account_preferences(int(account["id"]), group_name, bool(row["active"]))
+        if not bool(row["use"]) or not bool(row["active"]):
+            continue
         grouped.setdefault(group_name, {"offset_minutes": len(grouped) * 10, "accounts": []})
         grouped[group_name]["accounts"].append({**account, "group_name": group_name})
     return grouped
@@ -178,6 +180,49 @@ def render_status_counts(rows: list[dict]) -> None:
     cols = st.columns(4)
     for col, status in zip(cols, ["preview", "scheduled", "published", "failed"]):
         col.metric(status.title(), counts.get(status, 0))
+
+
+def account_status_label(account: dict) -> str:
+    if int(account.get("consecutive_failures", 0) or 0) >= 2:
+        return "Rate limited"
+    return "Active" if bool(account.get("active_for_day", 1)) else "Paused"
+
+
+def account_initials(account: dict) -> str:
+    label = str(account.get("username") or account.get("name") or "?").strip().lstrip("@")
+    parts = [part for part in label.replace("_", " ").replace(".", " ").split(" ") if part]
+    if not parts:
+        return "?"
+    return "".join(part[0].upper() for part in parts[:2])[:2]
+
+
+def group_color(group_name: str) -> tuple[str, str]:
+    palette = [
+        ("#8b5cf6", "rgba(139, 92, 246, .16)"),
+        ("#ef4444", "rgba(239, 68, 68, .14)"),
+        ("#64748b", "rgba(100, 116, 139, .16)"),
+        ("#2fbf7b", "rgba(47, 191, 123, .14)"),
+        ("#e7b958", "rgba(231, 185, 88, .14)"),
+    ]
+    index = sum(ord(char) for char in str(group_name or "tous")) % len(palette)
+    return palette[index]
+
+
+def render_group_badge(group_name: str) -> str:
+    dot, bg = group_color(group_name)
+    return (
+        f"<span class='account-group-badge' style='background:{bg}; color:{dot};'>"
+        f"<i style='background:{dot};'></i>{h(group_name)}</span>"
+    )
+
+
+def next_post_map(rows: list[dict]) -> dict[int, str]:
+    result: dict[int, str] = {}
+    for row in rows:
+        account_id = int(row.get("account_id", 0) or 0)
+        if account_id and account_id not in result:
+            result[account_id] = str(row.get("scheduled_time_local", ""))[11:16] or "-"
+    return result
 
 
 def render_group_summary(grouped: dict[str, dict]) -> None:
@@ -725,12 +770,160 @@ st.markdown(
         background: rgba(17, 19, 24, .35);
         font-size: .78rem;
     }
+    .accounts-shell {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(17, 19, 24, .58);
+        overflow: hidden;
+        margin-top: 14px;
+    }
+    .accounts-shell-lite {
+        border: 1px solid var(--line);
+        border-radius: 12px 12px 0 0;
+        background: rgba(17, 19, 24, .58);
+        overflow: hidden;
+        margin-top: 14px;
+    }
+    .accounts-toolbar {
+        display: grid;
+        grid-template-columns: minmax(220px, .9fr) minmax(320px, 1fr) auto;
+        gap: 14px;
+        align-items: end;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(244, 246, 251, .028);
+    }
+    .accounts-count {
+        color: var(--muted);
+        font-weight: 740;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+        padding-bottom: 10px;
+    }
+    .account-table-head {
+        display: grid;
+        grid-template-columns: 44px 2.2fr 1.1fr 1fr .9fr 1fr;
+        gap: 16px;
+        align-items: center;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--line);
+        color: var(--faint);
+        font-size: .74rem;
+        font-weight: 820;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+    }
+    .account-row-divider {
+        border-top: 1px solid var(--line);
+        margin: 0 -16px;
+    }
+    .account-person {
+        display: grid;
+        grid-template-columns: 48px minmax(0, 1fr);
+        gap: 12px;
+        align-items: center;
+        min-height: 56px;
+    }
+    .account-avatar, .account-avatar-fallback {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        border: 1px solid rgba(255, 255, 255, .1);
+        overflow: hidden;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, rgba(223,77,110,.28), rgba(100,116,139,.18));
+        color: rgba(248,250,252,.9);
+        font-size: .82rem;
+        font-weight: 850;
+    }
+    .account-avatar img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
+    .account-name strong, .account-name small {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .account-name strong {
+        color: var(--text);
+        font-size: .98rem;
+        line-height: 1.2;
+    }
+    .account-name small {
+        color: var(--muted);
+        margin-top: 3px;
+    }
+    .account-group-badge {
+        display: inline-flex;
+        align-items: center;
+        max-width: 100%;
+        gap: 7px;
+        border-radius: 7px;
+        padding: 7px 10px;
+        font-size: .84rem;
+        font-weight: 760;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .account-group-badge i {
+        width: 8px;
+        height: 14px;
+        border-radius: 999px;
+        flex: 0 0 auto;
+    }
+    .next-post-pill, .status-text {
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+        font-weight: 720;
+    }
+    .account-actions {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        color: var(--muted);
+    }
+    .account-actions a {
+        color: var(--muted) !important;
+        text-decoration: none;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 8px;
+        transition: border-color .22s cubic-bezier(.16, 1, .3, 1), background .22s cubic-bezier(.16, 1, .3, 1);
+    }
+    .account-actions a:hover {
+        border-color: rgba(223, 77, 110, .45);
+        background: rgba(223, 77, 110, .08);
+    }
+    .mobile-account-card {
+        display: none;
+    }
     .warn-copy {color: var(--accent); font-weight: 700;}
     @media (max-width: 900px) {
         .app-hero, .metric-strip, .flow-rail {
             grid-template-columns: 1fr;
         }
         .hero-status {justify-content: flex-start;}
+        .accounts-toolbar {
+            grid-template-columns: 1fr;
+        }
+        .accounts-count {
+            text-align: left;
+            padding-bottom: 0;
+        }
+        .account-table-head, .desktop-account-row {
+            display: none;
+        }
+        .mobile-account-card {
+            display: block;
+            border-top: 1px solid var(--line);
+            padding: 14px 0;
+        }
     }
     </style>
     """,
@@ -847,8 +1040,6 @@ with tabs[0]:
             key="selected_group_filters",
             help="Choisir un groupe ajoute tous ses comptes. Tu peux décocher un compte ensuite.",
         )
-        selected_ids = {int(a["id"]) for a in st.session_state.get("selected_accounts", [])}
-
         render_group_cards(groups, st.session_state.get("grouped_accounts", {}))
         if selected_group_filters:
             st.markdown("#### Comptes dans les groupes sélectionnés")
@@ -864,40 +1055,157 @@ with tabs[0]:
             st.info("Sélectionne un ou plusieurs groupes pour commencer.")
 
         st.markdown("#### Ajuster les comptes")
-        st.caption("Les groupes remplissent la sélection. Le tableau sert à décocher un compte ou changer son groupe.")
-        rows = []
+        st.caption("Les groupes remplissent la sélection. Le tableau sert à chercher, filtrer, décocher, mettre en pause ou changer un groupe.")
+
+        group_signature = tuple(selected_group_filters)
+        if st.session_state.get("_account_group_signature") != group_signature:
+            for account in accounts:
+                account_id = int(account["id"])
+                group_name = account.get("group_name") or "tous"
+                st.session_state[f"account_use_{account_id}"] = bool(account.get("active_for_day", 1)) and group_name in selected_group_filters
+            st.session_state["_account_group_signature"] = group_signature
+
         for account in accounts:
-            active = bool(account.get("active_for_day", 1))
-            group_name = account.get("group_name") or "tous"
-            if group_name not in group_options:
-                group_options.append(group_name)
-            selected_by_group = group_name in selected_group_filters if selected_group_filters else False
+            account_id = int(account["id"])
+            st.session_state.setdefault(f"account_group_{account_id}", account.get("group_name") or "tous")
+            st.session_state.setdefault(f"account_active_{account_id}", bool(account.get("active_for_day", 1)))
+            st.session_state.setdefault(f"account_use_{account_id}", False)
+
+        top_a, top_b, top_c = st.columns([1.15, 1.15, .65])
+        with top_a:
+            account_query = st.text_input("Search accounts", placeholder="Search accounts...", label_visibility="collapsed")
+        with top_b:
+            status_filter = st.radio(
+                "Statut comptes",
+                ["All", "Active", "Paused", "Rate limited"],
+                horizontal=True,
+                label_visibility="collapsed",
+            )
+        visible_accounts = []
+        query = account_query.strip().lower()
+        for account in accounts:
+            account_id = int(account["id"])
+            group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
+            active = bool(st.session_state.get(f"account_active_{account_id}", bool(account.get("active_for_day", 1))))
+            enriched = {**account, "group_name": group_name, "active_for_day": int(active)}
+            status = account_status_label(enriched)
+            label_text = f"{account.get('name','')} {account.get('username','')} {group_name}".lower()
+            if query and query not in label_text:
+                continue
+            if status_filter != "All" and status != status_filter:
+                continue
+            visible_accounts.append(enriched)
+        with top_c:
+            st.markdown(f"<div class='accounts-count'>{len(visible_accounts)} of {len(accounts)}</div>", unsafe_allow_html=True)
+
+        action_a, action_b, _ = st.columns([.65, .65, 2.7])
+        if action_a.button("Sélectionner visibles"):
+            for account in visible_accounts:
+                st.session_state[f"account_use_{int(account['id'])}"] = True
+            st.rerun()
+        if action_b.button("Désélectionner visibles"):
+            for account in visible_accounts:
+                st.session_state[f"account_use_{int(account['id'])}"] = False
+            st.rerun()
+
+        st.markdown(
+            "<div class='accounts-shell-lite'>"
+            "<div class='account-table-head'>"
+            "<span></span><span>Username</span><span>Group</span><span>Next post</span><span>Status</span><span>Actions</span>"
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        next_by_account = next_post_map(db.list_scheduled())
+        if not visible_accounts:
+            render_locked_step(
+                "Aucun compte trouvé avec ces filtres.",
+                ["Change la recherche, le filtre de statut, ou sélectionne un autre groupe."],
+            )
+
+        rows = []
+        for row_index, account in enumerate(visible_accounts):
+            account_id = int(account["id"])
+            if row_index:
+                st.markdown("<div class='account-row-divider'></div>", unsafe_allow_html=True)
+            row_cols = st.columns([.38, 2.2, 1.15, .9, .95, .9])
+            with row_cols[0]:
+                use_account = st.checkbox("Utiliser", key=f"account_use_{account_id}", label_visibility="collapsed")
+            with row_cols[1]:
+                avatar_url = account.get("avatar_url")
+                display_name = account.get("name") or account_label(account)
+                handle = account_label(account)
+                avatar_html = (
+                    f"<span class='account-avatar'><img src='{h(avatar_url)}' alt=''></span>"
+                    if avatar_url
+                    else f"<span class='account-avatar-fallback'>{h(account_initials(account))}</span>"
+                )
+                st.markdown(
+                    "<div class='account-person'>"
+                    f"{avatar_html}"
+                    "<div class='account-name'>"
+                    f"<strong>{h(display_name)}</strong>"
+                    f"<small>{h(handle)}</small>"
+                    "</div></div>",
+                    unsafe_allow_html=True,
+                )
+            with row_cols[2]:
+                selected_group = st.selectbox(
+                    f"Groupe {account_id}",
+                    options=group_options,
+                    key=f"account_group_{account_id}",
+                    label_visibility="collapsed",
+                )
+                st.markdown(render_group_badge(selected_group), unsafe_allow_html=True)
+            with row_cols[3]:
+                st.markdown(
+                    f"<span class='next-post-pill'>{h(next_by_account.get(account_id, '-'))}</span>",
+                    unsafe_allow_html=True,
+                )
+            with row_cols[4]:
+                active_account = st.toggle(
+                    f"Actif {account_id}",
+                    key=f"account_active_{account_id}",
+                    label_visibility="collapsed",
+                )
+                status_text = account_status_label({**account, "group_name": selected_group, "active_for_day": int(active_account)})
+                st.markdown(f"<span class='status-text'>{h(status_text)}</span>", unsafe_allow_html=True)
+            with row_cols[5]:
+                account_url = account.get("url")
+                action_link = (
+                    f"<a href='{h(account_url)}' target='_blank' rel='noreferrer'>Ouvrir</a>"
+                    if account_url
+                    else "<span>Aucun lien</span>"
+                )
+                st.markdown(f"<div class='account-actions'>{action_link}</div>", unsafe_allow_html=True)
             rows.append(
                 {
-                    "use": active and (selected_by_group or int(account["id"]) in selected_ids),
-                    "id": int(account["id"]),
+                    "use": bool(use_account),
+                    "id": account_id,
                     "compte": account_label(account),
-                    "group": account.get("group_name") or "tous",
-                    "active": active,
+                    "group": selected_group,
+                    "active": bool(active_account),
                     "url": account.get("url", ""),
                 }
             )
-        edited_accounts = st.data_editor(
-            pd.DataFrame(rows),
-            hide_index=True,
-            use_container_width=True,
-            height=min(760, 140 + max(1, len(rows)) * 36),
-            column_config={
-                "use": st.column_config.CheckboxColumn("Utiliser"),
-                "id": st.column_config.NumberColumn("ID", disabled=True),
-                "compte": st.column_config.TextColumn("Compte", disabled=True),
-                "group": st.column_config.SelectboxColumn("Groupe", options=group_options),
-                "active": st.column_config.CheckboxColumn("Actif"),
-                "url": st.column_config.LinkColumn("Lien", disabled=True),
-            },
-            disabled=["id", "compte", "url"],
-            key="accounts_editor",
-        )
+
+        hidden_ids = {int(account["id"]) for account in visible_accounts}
+        for account in accounts:
+            account_id = int(account["id"])
+            if account_id in hidden_ids:
+                continue
+            rows.append(
+                {
+                    "use": bool(st.session_state.get(f"account_use_{account_id}", False)),
+                    "id": account_id,
+                    "compte": account_label(account),
+                    "group": st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous"),
+                    "active": bool(st.session_state.get(f"account_active_{account_id}", bool(account.get("active_for_day", 1)))),
+                    "url": account.get("url", ""),
+                }
+            )
+        edited_accounts = pd.DataFrame(rows)
         grouped = build_grouped_accounts(accounts, edited_accounts)
         selected_accounts = [account for group in grouped.values() for account in group["accounts"]]
         st.session_state["grouped_accounts"] = grouped
