@@ -306,6 +306,46 @@ def render_flow_status(
         )
 
 
+def render_workspace_picker(client: PostoriaClient | None, key_prefix: str) -> int | str | None:
+    current_workspace = st.session_state.get("workspace_id")
+    if not client:
+        st.info("Clé API Postoria manquante ou invalide. Ajoute les secrets avant l'envoi réel.")
+        return current_workspace
+
+    if st.button("Récupérer workspaces Postoria", key=f"{key_prefix}_load_workspaces"):
+        try:
+            st.session_state["workspaces"] = client.list_workspaces()
+        except Exception as e:
+            st.error(str(e))
+
+    workspaces = st.session_state.get("workspaces", [])
+    if not workspaces:
+        st.info("Aucun workspace chargé. Clique sur Récupérer workspaces Postoria.")
+        return current_workspace
+
+    workspace_ids = [w["id"] for w in workspaces]
+    current_index = 0
+    if current_workspace is not None:
+        for idx, workspace_id in enumerate(workspace_ids):
+            if str(workspace_id) == str(current_workspace):
+                current_index = idx
+                break
+    if len(workspace_ids) == 1:
+        st.session_state["workspace_id"] = workspace_ids[0]
+        st.success(f"Workspace sélectionné : {workspaces[0].get('name', workspace_ids[0])}")
+        return workspace_ids[0]
+
+    picked_workspace = st.selectbox(
+        "Workspace Postoria",
+        options=workspace_ids,
+        index=current_index,
+        format_func=lambda wid: next(str(w.get("name", wid)) for w in workspaces if str(w["id"]) == str(wid)),
+        key=f"{key_prefix}_workspace_id",
+    )
+    st.session_state["workspace_id"] = picked_workspace
+    return picked_workspace
+
+
 st.set_page_config(page_title="Postoria Threads Scheduler", layout="wide")
 st.markdown(
     """
@@ -909,7 +949,8 @@ with tabs[4]:
         "Dernier verrou avant action réelle.",
         "L'envoi reste bloqué tant qu'il manque comptes, posts, preview, API ou que dry-run est actif.",
     )
-    workspace_id = st.session_state.get("workspace_id")
+    with st.expander("Workspace Postoria", expanded=not st.session_state.get("workspace_id")):
+        workspace_id = render_workspace_picker(client, "send")
     preview = db.list_scheduled("preview")
     total_photos = sum(len(row.get("media_ids") or []) for row in preview)
     total_replies = sum(len(row.get("chain_replies") or []) for row in preview)
