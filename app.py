@@ -144,6 +144,48 @@ def scheduled_dataframe(rows: list[dict]) -> pd.DataFrame:
     return df
 
 
+def analytics_dataframe(rows: list[dict]) -> pd.DataFrame:
+    df = scheduled_dataframe(rows)
+    if df.empty:
+        return df
+    days = df["day"].apply(parse_day)
+    df.loc[:, "week"] = days.apply(
+        lambda value: f"{value.isocalendar().year}-W{value.isocalendar().week:02d}" if value else "Date inconnue"
+    )
+    df.loc[:, "month"] = df["day"].astype(str).str.slice(0, 7)
+    df.loc[:, "month"] = df["month"].where(df["month"].str.len() == 7, "Date inconnue")
+    df.loc[:, "account_name"] = df["account_name"].fillna("Compte inconnu")
+    df.loc[:, "status"] = df["status"].fillna("unknown")
+    return df
+
+
+def count_by(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=[*columns, "posts"])
+    return (
+        df.groupby(columns, dropna=False)
+        .size()
+        .reset_index(name="posts")
+        .sort_values("posts", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def pivot_counts(df: pd.DataFrame, index: str, columns: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    pivot = pd.pivot_table(
+        df,
+        index=index,
+        columns=columns,
+        values="id",
+        aggfunc="count",
+        fill_value=0,
+    )
+    pivot.loc[:, "Total"] = pivot.sum(axis=1)
+    return pivot.sort_values("Total", ascending=False)
+
+
 def filter_scheduled_rows(rows: list[dict], status_filter: str, date_filter: str, account_filter: str, group_filter: str, query: str) -> pd.DataFrame:
     df = scheduled_dataframe(rows)
     if df.empty:
@@ -342,6 +384,7 @@ def render_flow_status(
     cadence_ready: bool,
     posts_ready: bool,
     preview_ready: bool,
+    analytics_ready: bool,
     send_ready: bool,
 ) -> None:
     steps = [
@@ -349,7 +392,8 @@ def render_flow_status(
         ("2", "Cadence", cadence_ready),
         ("3", "Posts/photos", posts_ready),
         ("4", "Preview", preview_ready),
-        ("5", "Envoi", send_ready),
+        ("5", "Analytics", analytics_ready),
+        ("6", "Envoi", send_ready),
     ]
     items = []
     for number, label, ready in steps:
@@ -394,6 +438,97 @@ def render_metric_strip(metrics: list[tuple[str, str, str]]) -> None:
             "</div>"
         )
     st.markdown("<div class='metric-strip'>" + "".join(items) + "</div>", unsafe_allow_html=True)
+
+
+def render_analytics(rows: list[dict]) -> None:
+    df = analytics_dataframe(rows)
+    if df.empty:
+        render_locked_step(
+            "Analytics indisponibles.",
+            ["Génère une preview ou récupère des statuts Postoria pour créer les données d'analyse."],
+        )
+        return
+
+    status_options = ["Tous"] + sorted(df["status"].dropna().astype(str).unique().tolist())
+    group_options = ["Tous les groupes"] + sorted(df["group_name"].dropna().astype(str).unique().tolist())
+    account_options = ["Tous les comptes"] + sorted(df["account_name"].dropna().astype(str).unique().tolist())
+
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        status_filter = st.selectbox("Statut", status_options, key="analytics_status")
+    with f2:
+        group_filter = st.selectbox("Groupe", group_options, key="analytics_group")
+    with f3:
+        account_filter = st.selectbox("Compte", account_options, key="analytics_account")
+
+    filtered = df.copy()
+    if status_filter != "Tous":
+        filtered = filtered[filtered["status"].astype(str) == status_filter]
+    if group_filter != "Tous les groupes":
+        filtered = filtered[filtered["group_name"].astype(str) == group_filter]
+    if account_filter != "Tous les comptes":
+        filtered = filtered[filtered["account_name"].astype(str) == account_filter]
+
+    total_posts = len(filtered)
+    total_accounts = filtered["account_name"].nunique() if not filtered.empty else 0
+    total_groups = filtered["group_name"].nunique() if not filtered.empty else 0
+    total_days = filtered["day"].nunique() if not filtered.empty else 0
+    render_metric_strip(
+        [
+            ("Posts", str(total_posts), "dans le filtre"),
+            ("Comptes", str(total_accounts), "avec volume"),
+            ("Groupes", str(total_groups), "avec volume"),
+            ("Jours", str(total_days), "couverts"),
+        ]
+    )
+
+    if filtered.empty:
+        render_locked_step(
+            "Aucun volume pour ces filtres.",
+            ["Change le statut, le groupe ou le compte pour afficher les analytics."],
+        )
+        return
+
+    st.markdown("#### Volumes simples")
+    simple_tabs = st.tabs(["Par compte", "Par groupe", "Par jour", "Par semaine", "Par mois"])
+    simple_specs = [
+        (simple_tabs[0], ["account_name"], "account_name"),
+        (simple_tabs[1], ["group_name"], "group_name"),
+        (simple_tabs[2], ["day"], "day"),
+        (simple_tabs[3], ["week"], "week"),
+        (simple_tabs[4], ["month"], "month"),
+    ]
+    for tab, dimensions, chart_key in simple_specs:
+        with tab:
+            summary = count_by(filtered, dimensions)
+            c1, c2 = st.columns([1.2, 1])
+            with c1:
+                st.dataframe(summary, use_container_width=True, hide_index=True, height=420)
+            with c2:
+                chart_data = summary.set_index(chart_key)["posts"] if chart_key in summary.columns else summary["posts"]
+                st.bar_chart(chart_data)
+
+    st.markdown("#### Matrices de contrôle")
+    matrix_tabs = st.tabs([
+        "Compte x jour",
+        "Compte x semaine",
+        "Compte x mois",
+        "Groupe x jour",
+        "Groupe x semaine",
+        "Groupe x mois",
+    ])
+    matrix_specs = [
+        (matrix_tabs[0], "account_name", "day"),
+        (matrix_tabs[1], "account_name", "week"),
+        (matrix_tabs[2], "account_name", "month"),
+        (matrix_tabs[3], "group_name", "day"),
+        (matrix_tabs[4], "group_name", "week"),
+        (matrix_tabs[5], "group_name", "month"),
+    ]
+    for tab, index, columns in matrix_specs:
+        with tab:
+            matrix = pivot_counts(filtered, index, columns)
+            st.dataframe(matrix, use_container_width=True, height=520)
 
 
 def render_blocker_chips(blockers: list[str]) -> None:
@@ -619,7 +754,7 @@ st.markdown(
     }
     .flow-rail {
         display: grid;
-        grid-template-columns: 1.2fr .9fr 1.1fr .85fr .85fr;
+        grid-template-columns: 1.15fr .85fr 1.05fr .8fr .95fr .8fr;
         gap: 8px;
         margin: 8px 0 18px;
     }
@@ -942,7 +1077,8 @@ with st.sidebar:
     st.write("2. Définir la cadence")
     st.write("3. Charger textes + médias")
     st.write("4. Vérifier la preview")
-    st.write("5. Confirmer l'envoi")
+    st.write("5. Lire les analytics")
+    st.write("6. Confirmer l'envoi")
 
 client = None
 if api_exists:
@@ -962,6 +1098,7 @@ accounts_ready = selected_accounts_count > 0
 cadence_ready = accounts_ready and int(current["posts_max"]) <= capacity_now
 posts_ready = selected_posts_count > 0
 preview_ready = len(preview) > 0
+analytics_ready = len(db.list_scheduled()) > 0
 send_ready = preview_ready and api_exists and not dry_run
 
 render_app_header(api_exists, dry_run, APP_TZ)
@@ -970,13 +1107,13 @@ render_metric_strip(
         ("Comptes prêts", str(selected_accounts_count), "sélection depuis groupes"),
         ("Textes prêts", str(selected_posts_count), "rotation possible"),
         ("Preview", str(len(preview)), "posts à vérifier"),
-        ("Médias", str(sum(1 for p in st.session_state.get("selected_posts", []) if p.get("media_ids"))), "posts avec photos"),
+        ("Analytics", str(len(db.list_scheduled())), "posts analysés"),
     ]
 )
 
-render_flow_status(accounts_ready, cadence_ready, posts_ready, preview_ready, send_ready)
+render_flow_status(accounts_ready, cadence_ready, posts_ready, preview_ready, analytics_ready, send_ready)
 
-tabs = st.tabs(["1. Comptes", "2. Cadence", "3. Posts & Photos", "4. Preview", "5. Envoi"])
+tabs = st.tabs(["1. Comptes", "2. Cadence", "3. Posts & Photos", "4. Preview", "5. Analytics", "6. Envoi"])
 
 with tabs[0]:
     st.subheader("Comptes et groupes")
@@ -1589,9 +1726,18 @@ with tabs[3]:
         )
 
 with tabs[4]:
-    st.subheader("Envoi Postoria")
+    st.subheader("Analytics de volume")
     section_intro(
         "Étape 5",
+        "Contrôle les volumes par compte, groupe et période.",
+        "Les analytics utilisent tous les posts connus: preview, scheduled, published, failed et erreurs.",
+    )
+    render_analytics(db.list_scheduled())
+
+with tabs[5]:
+    st.subheader("Envoi Postoria")
+    section_intro(
+        "Étape 6",
         "Dernier verrou avant action réelle.",
         "L'envoi reste bloqué tant qu'il manque comptes, posts, preview, API ou que dry-run est actif.",
     )
