@@ -83,6 +83,7 @@ def generate_schedule(
 
         for account_index, account in enumerate(accounts):
             account_used_hashes: set[str] = set()
+            allow_account_reuse = post_count < max_posts
             account_start = start_dt + timedelta(minutes=offset_minutes + account_index * 3)
             account_post_count = min_posts if min_posts == max_posts else rng.randint(min_posts, max_posts)
             account_posts = list(selected_posts)
@@ -115,7 +116,9 @@ def generate_schedule(
                     idx = (slot + account_index + strategy_offset + attempt) % post_count
                     post = account_posts[idx]
                     h = post.get("caption_hash") or caption_hash(post["caption"])
-                    if h in account_used_hashes:
+                    if h in account_used_hashes and not allow_account_reuse:
+                        continue
+                    if allow_account_reuse and len(account_used_hashes) < post_count and h in account_used_hashes:
                         continue
                     too_close = any(
                         abs((scheduled_at - previous).total_seconds()) < same_caption_margin_minutes * 60
