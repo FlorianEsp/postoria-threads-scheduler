@@ -173,6 +173,7 @@ def scheduled_dataframe(rows: list[dict]) -> pd.DataFrame:
     df.loc[:, "error"] = df.get("error", "").fillna("") if "error" in df.columns else ""
     df.loc[:, "replies"] = df.get("chain_replies", []).apply(lambda value: len(value or [])) if "chain_replies" in df.columns else 0
     df.loc[:, "threads_url"] = df.get("threads_url", "").fillna("") if "threads_url" in df.columns else ""
+    df.loc[:, "preview_batch"] = df.get("preview_batch_id", "").fillna("") if "preview_batch_id" in df.columns else ""
     return df
 
 
@@ -262,10 +263,16 @@ def is_failed_status(row: dict) -> bool:
 
 def schedule_category_counts(rows: list[dict]) -> dict[str, int]:
     preview_count = sum(1 for row in rows if str(row.get("status")) == "preview")
+    saved_preview_count = sum(1 for row in rows if str(row.get("status")) == "preview_saved")
     failed_count = sum(1 for row in rows if is_failed_status(row))
-    planned_count = sum(1 for row in rows if str(row.get("status")) != "preview" and not is_failed_status(row))
+    planned_count = sum(
+        1
+        for row in rows
+        if str(row.get("status")) not in ("preview", "preview_saved") and not is_failed_status(row)
+    )
     return {
         "Preview brouillon": preview_count,
+        "Anciennes previews": saved_preview_count,
         "Déjà planifiés": planned_count,
         "Failed": failed_count,
         "Tout": len(rows),
@@ -959,9 +966,10 @@ st.markdown(
     .step-note {
         border: 1px solid var(--line);
         border-radius: 8px;
-        padding: 14px 16px;
+        padding: 17px 18px;
         background: var(--panel);
-        min-height: 76px;
+        min-height: 92px;
+        margin: 8px 0 10px;
     }
     .section-intro {
         border-top: 1px solid var(--line);
@@ -1009,16 +1017,16 @@ st.markdown(
     .blocked-panel ul {margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.55;}
     .group-strip {
         display: flex;
-        gap: 10px;
+        gap: 14px;
         overflow-x: auto;
-        padding: 2px 0 14px;
-        margin: 2px 0 10px;
+        padding: 6px 0 18px;
+        margin: 8px 0 16px;
     }
     .group-chip {
         min-width: 176px;
         border: 1px solid var(--line);
         border-radius: 999px;
-        padding: 9px 12px;
+        padding: 11px 14px;
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
         gap: 2px 8px;
@@ -1089,7 +1097,7 @@ st.markdown(
         border-radius: 12px 12px 0 0;
         background: rgba(17, 19, 24, .58);
         overflow: hidden;
-        margin-top: 14px;
+        margin-top: 22px;
     }
     .accounts-toolbar {
         display: grid;
@@ -1112,7 +1120,7 @@ st.markdown(
         grid-template-columns: 44px 2.2fr 1.1fr 1fr .9fr 1fr;
         gap: 16px;
         align-items: center;
-        padding: 14px 18px;
+        padding: 16px 20px;
         border-bottom: 1px solid var(--line);
         color: var(--faint);
         font-size: .74rem;
@@ -1122,14 +1130,14 @@ st.markdown(
     }
     .account-row-divider {
         border-top: 1px solid var(--line);
-        margin: 0 -16px;
+        margin: 2px -16px;
     }
     .account-person {
         display: grid;
         grid-template-columns: 48px minmax(0, 1fr);
-        gap: 12px;
+        gap: 14px;
         align-items: center;
-        min-height: 56px;
+        min-height: 68px;
     }
     .account-avatar, .account-avatar-fallback {
         width: 44px;
@@ -1170,8 +1178,8 @@ st.markdown(
         align-items: center;
         max-width: 100%;
         gap: 7px;
-        border-radius: 7px;
-        padding: 7px 10px;
+        border-radius: 8px;
+        padding: 8px 11px;
         font-size: .84rem;
         font-weight: 760;
         white-space: nowrap;
@@ -1215,11 +1223,11 @@ st.markdown(
         border-radius: 10px;
         overflow: hidden;
         background: var(--line);
-        margin: 10px 0 12px;
+        margin: 18px 0 18px;
     }
     .account-selection-summary div {
         background: rgba(17, 19, 24, .66);
-        padding: 11px 13px;
+        padding: 13px 15px;
     }
     .account-selection-summary span {
         display: block;
@@ -1409,7 +1417,7 @@ with tabs[0]:
     if not accounts:
         st.info("Aucun compte local. Charge les comptes Postoria d'abord.")
     else:
-        st.markdown("#### Groupes")
+        st.markdown("#### Choisir les comptes")
         groups = db.list_groups()
         group_color_by_name = {group["name"]: group.get("color") for group in groups}
         group_options = [g["name"] for g in groups] or ["tous"]
@@ -1421,20 +1429,14 @@ with tabs[0]:
             for group_name in group_options
         }
 
-        st.markdown("#### Sélection rapide")
-        preset_a, preset_b, preset_c = st.columns([1, 1, 1])
+        st.caption("Action principale: prends un groupe ou tous les comptes actifs. Ensuite ajuste seulement les exceptions dans la liste.")
+        preset_a, preset_c = st.columns([1, 1])
         if preset_a.button("Tous les comptes actifs"):
             st.session_state["selected_group_filters"] = group_options
             st.session_state.pop("_account_group_signature", None)
             for account in accounts:
                 account_id = int(account["id"])
                 st.session_state[f"account_use_{account_id}"] = bool(account.get("active_for_day", 1))
-            st.rerun()
-        if preset_b.button("Vider la sélection"):
-            st.session_state["selected_group_filters"] = []
-            st.session_state.pop("_account_group_signature", None)
-            for account in accounts:
-                st.session_state[f"account_use_{int(account['id'])}"] = False
             st.rerun()
         if preset_c.button("Créer un groupe rapide"):
             st.session_state["show_group_dialog"] = True
@@ -1460,6 +1462,7 @@ with tabs[0]:
                 if st.session_state.get(f"account_use_{int(account['id'])}", False)
             )
             with group_cols[idx % len(group_cols)]:
+                group_is_selected = group_name in st.session_state.get("selected_group_filters", [])
                 st.markdown(
                     "<div class='step-note'>"
                     f"{render_group_badge(group_name, group.get('color'))}<br>"
@@ -1467,21 +1470,19 @@ with tabs[0]:
                     "</div>",
                     unsafe_allow_html=True,
                 )
-                take_col, remove_col = st.columns(2)
                 group_key = f"{idx}_{widget_slug(group_name)}"
-                if take_col.button("Prendre", key=f"take_group_{group_key}", disabled=not group_accounts):
+                action_label = "Enlever ce groupe" if group_is_selected else "Utiliser ce groupe"
+                if st.button(action_label, key=f"toggle_group_{group_key}", disabled=not group_accounts):
                     selected = set(st.session_state.get("selected_group_filters", []))
-                    selected.add(group_name)
+                    if group_is_selected:
+                        selected.discard(group_name)
+                    else:
+                        selected.add(group_name)
                     st.session_state["selected_group_filters"] = [name for name in group_options if name in selected]
                     st.session_state.pop("_account_group_signature", None)
                     st.rerun()
-                if remove_col.button("Retirer", key=f"remove_group_{group_key}", disabled=not group_accounts):
-                    selected = [name for name in st.session_state.get("selected_group_filters", []) if name != group_name]
-                    st.session_state["selected_group_filters"] = selected
-                    st.session_state.pop("_account_group_signature", None)
-                    st.rerun()
 
-        with st.expander("Sélection avancée"):
+        with st.expander("Sélection avancée par nom de groupe"):
             advanced_groups = st.multiselect(
                 "Groupes à utiliser",
                 options=group_options,
@@ -1504,8 +1505,8 @@ with tabs[0]:
         else:
             st.info("Prends un groupe ou choisis tous les comptes actifs pour commencer.")
 
-        st.markdown("#### Ajuster les comptes")
-        st.caption("Les groupes remplissent la sélection. Le tableau sert à chercher, filtrer, décocher, mettre en pause ou changer un groupe.")
+        st.markdown("#### Ajuster seulement les exceptions")
+        st.caption("Décoche un compte, change son groupe ou mets-le en pause seulement si nécessaire.")
 
         for account in accounts:
             account_id = int(account["id"])
@@ -1556,32 +1557,6 @@ with tabs[0]:
             unsafe_allow_html=True,
         )
 
-        action_a, action_b, _ = st.columns([1.15, .75, 2.1])
-        with action_a:
-            bulk_action = st.selectbox(
-                "Action groupée",
-                [
-                    "Sélectionner visibles",
-                    "Désélectionner visibles",
-                    "Mettre visibles en Active",
-                    "Mettre visibles en Paused",
-                ],
-            )
-        if action_b.button("Appliquer", disabled=not visible_accounts):
-            for account in visible_accounts:
-                account_id = int(account["id"])
-                if bulk_action == "Sélectionner visibles":
-                    st.session_state[f"account_use_{account_id}"] = True
-                elif bulk_action == "Désélectionner visibles":
-                    st.session_state[f"account_use_{account_id}"] = False
-                elif bulk_action == "Mettre visibles en Active":
-                    st.session_state[f"account_active_{account_id}"] = True
-                    st.session_state[f"account_status_{account_id}"] = "Active"
-                elif bulk_action == "Mettre visibles en Paused":
-                    st.session_state[f"account_active_{account_id}"] = False
-                    st.session_state[f"account_status_{account_id}"] = "Paused"
-            st.rerun()
-
         selected_accounts_preview = [
             account for account in accounts
             if st.session_state.get(f"account_use_{int(account['id'])}", False)
@@ -1606,9 +1581,6 @@ with tabs[0]:
                             f"{render_group_badge(group_name, group_color_by_name.get(group_name))}",
                             unsafe_allow_html=True,
                         )
-                        if st.button("Retirer", key=f"remove_selected_{account_id}"):
-                            st.session_state[f"account_use_{account_id}"] = False
-                            st.rerun()
                 if len(selected_accounts_preview) > 18:
                     st.caption(f"+ {len(selected_accounts_preview) - 18} autres comptes sélectionnés.")
             else:
@@ -1879,11 +1851,19 @@ with tabs[2]:
             )
             if uploaded:
                 frame = pd.read_csv(uploaded)
-                added, skipped = db.add_posts(make_post_records(frame))
-                if added:
+                records = make_post_records(frame)
+                added, skipped, imported_ids = db.add_posts_with_ids(records)
+                imported_posts = [
+                    post for post in db.list_posts(active_only=False)
+                    if int(post["id"]) in set(imported_ids)
+                ]
+                st.session_state["selected_posts"] = imported_posts
+                st.session_state["_selected_posts_signature"] = tuple(sorted(imported_ids))
+                st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                if imported_ids:
                     if clear_preview_draft("Preview brouillon supprimée: nouveaux posts importés. Les posts déjà planifiés restent conservés."):
                         st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
-                st.success(f"{added} posts ajoutés, {skipped} ignorés/doublons.")
+                st.success(f"{added} posts ajoutés, {skipped} doublons réutilisés. Lot actif: {len(imported_posts)} posts du CSV.")
                 posts = db.list_posts(active_only=False)
         with manual_col:
             with st.form("manual_posts"):
@@ -1905,11 +1885,18 @@ with tabs[2]:
                         for line in bulk.splitlines()
                         if line.strip()
                     ]
-                    added, skipped = db.add_posts(records)
-                    if added:
+                    added, skipped, imported_ids = db.add_posts_with_ids(records)
+                    imported_posts = [
+                        post for post in db.list_posts(active_only=False)
+                        if int(post["id"]) in set(imported_ids)
+                    ]
+                    st.session_state["selected_posts"] = imported_posts
+                    st.session_state["_selected_posts_signature"] = tuple(sorted(imported_ids))
+                    st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                    if imported_ids:
                         if clear_preview_draft("Preview brouillon supprimée: nouveaux posts ajoutés. Les posts déjà planifiés restent conservés."):
                             st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
-                    st.success(f"{added} posts ajoutés, {skipped} ignorés/doublons.")
+                    st.success(f"{added} posts ajoutés, {skipped} doublons réutilisés. Lot actif: {len(imported_posts)} posts.")
                     posts = db.list_posts(active_only=False)
 
         posts = db.list_posts(active_only=False)
@@ -1952,11 +1939,12 @@ with tabs[2]:
                     "used": st.column_config.NumberColumn("Usages", disabled=True),
                 },
                 disabled=["id", "caption", "used"],
-                key="posts_editor",
+                key=f"posts_editor_{st.session_state.get('posts_editor_version', 0)}",
             )
             if st.button("Tout sélectionner"):
                 clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
                 st.session_state["selected_posts"] = db.list_posts(active_only=True)
+                st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
                 st.rerun()
             if st.button("Sauver posts/photos"):
                 for _, row in edited_posts.iterrows():
@@ -2058,6 +2046,7 @@ with tabs[3]:
         category_counts = schedule_category_counts(all_scheduled)
         category_labels = [
             f"Preview brouillon ({category_counts['Preview brouillon']})",
+            f"Anciennes previews ({category_counts['Anciennes previews']})",
             f"Déjà planifiés ({category_counts['Déjà planifiés']})",
             f"Failed ({category_counts['Failed']})",
             f"Tout ({category_counts['Tout']})",
@@ -2071,10 +2060,12 @@ with tabs[3]:
         category = category_choice.split(" (", 1)[0]
         if category == "Preview brouillon":
             category_rows = [row for row in all_scheduled if str(row.get("status")) == "preview"]
+        elif category == "Anciennes previews":
+            category_rows = [row for row in all_scheduled if str(row.get("status")) == "preview_saved"]
         elif category == "Déjà planifiés":
             category_rows = [
                 row for row in all_scheduled
-                if str(row.get("status")) != "preview" and not is_failed_status(row)
+                if str(row.get("status")) not in ("preview", "preview_saved") and not is_failed_status(row)
             ]
         elif category == "Failed":
             category_rows = [row for row in all_scheduled if is_failed_status(row)]
@@ -2125,7 +2116,7 @@ with tabs[3]:
             if not failed_rows.empty:
                 st.error(f"{len(failed_rows)} posts failed/error. Question: corriger les posts, relancer ces comptes, ou supprimer ces programmations ?")
 
-            visible_cols = ["day", "time", "account_name", "threads_url", "group_name", "status", "photos", "replies", "text", "error"]
+            visible_cols = ["day", "time", "preview_batch", "account_name", "threads_url", "group_name", "status", "photos", "replies", "text", "error"]
             column_config = {
                 "threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir"),
             }

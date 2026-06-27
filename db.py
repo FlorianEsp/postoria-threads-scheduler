@@ -174,6 +174,7 @@ def init_db() -> None:
                 chain_replies TEXT DEFAULT '',
                 postoria_post_id INTEGER,
                 status TEXT DEFAULT 'preview',
+                preview_batch_id TEXT,
                 error TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
@@ -192,14 +193,16 @@ def init_db() -> None:
         _ensure_column(conn, "scheduled_posts", "content_type", "TEXT DEFAULT 'text'")
         _ensure_column(conn, "scheduled_posts", "variables_json", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "chain_replies", "TEXT DEFAULT ''")
+        _ensure_column(conn, "scheduled_posts", "preview_batch_id", "TEXT")
         conn.execute(
             "INSERT OR IGNORE INTO account_groups (name, offset_minutes) VALUES ('tous', 0)"
         )
 
 
-def add_posts(posts: Iterable[str | dict[str, Any]]) -> tuple[int, int]:
+def add_posts_with_ids(posts: Iterable[str | dict[str, Any]]) -> tuple[int, int, list[int]]:
     added = 0
     skipped = 0
+    ids: list[int] = []
     with connect() as conn:
         for raw in posts:
             if isinstance(raw, dict):
@@ -219,18 +222,28 @@ def add_posts(posts: Iterable[str | dict[str, Any]]) -> tuple[int, int]:
             if not caption:
                 skipped += 1
                 continue
+            h = caption_hash(caption)
             try:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     INSERT INTO post_library
                     (caption, caption_hash, media_ids, photo_note, media_folder, variables_json, reply_chain)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (caption, caption_hash(caption), media_ids, photo_note, media_folder, variables_json, reply_chain),
+                    (caption, h, media_ids, photo_note, media_folder, variables_json, reply_chain),
                 )
+                ids.append(int(cursor.lastrowid))
                 added += 1
             except sqlite3.IntegrityError:
                 skipped += 1
+                row = conn.execute("SELECT id FROM post_library WHERE caption_hash = ?", (h,)).fetchone()
+                if row:
+                    ids.append(int(row["id"]))
+    return added, skipped, ids
+
+
+def add_posts(posts: Iterable[str | dict[str, Any]]) -> tuple[int, int]:
+    added, skipped, _ = add_posts_with_ids(posts)
     return added, skipped
 
 
@@ -395,21 +408,27 @@ def media_folder_map() -> dict[str, list[str]]:
 
 
 def save_preview(rows: list[dict[str, Any]]) -> None:
+    from datetime import datetime
+
+    batch_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     with connect() as conn:
-        conn.execute("DELETE FROM scheduled_posts WHERE status = 'preview'")
+        conn.execute(
+            "UPDATE scheduled_posts SET status = 'preview_saved' WHERE status = 'preview'"
+        )
         for r in rows:
             conn.execute(
                 """
                 INSERT INTO scheduled_posts
                 (library_post_id, caption_hash, caption, account_id, account_name, group_name,
-                 scheduled_time_local, scheduled_time_utc, media_ids, content_type, variables_json, chain_replies, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'preview')
+                 scheduled_time_local, scheduled_time_utc, media_ids, content_type, variables_json, chain_replies, status, preview_batch_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'preview', ?)
                 """,
                 (
                     r["library_post_id"], r["caption_hash"], r["caption"], r["account_id"],
                     r["account_name"], r.get("group_name"), r["scheduled_time_local"], r["scheduled_time_utc"],
                     serialize_media_ids(r.get("media_ids", [])), r.get("content_type", "text"),
-                    serialize_json_map(r.get("variables", {})), serialize_lines(r.get("chain_replies", []))
+                    serialize_json_map(r.get("variables", {})), serialize_lines(r.get("chain_replies", [])),
+                    batch_id,
                 ),
             )
 
