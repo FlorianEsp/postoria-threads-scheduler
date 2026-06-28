@@ -1452,6 +1452,8 @@ st.markdown(
     }
     .block-container {
         max-width: 1380px;
+        margin-left: auto;
+        margin-right: auto;
         padding-top: 1.4rem;
         padding-bottom: 4rem;
     }
@@ -1479,10 +1481,12 @@ st.markdown(
     .app-hero {
         padding: 22px 24px;
         margin-bottom: 20px;
+        text-align: center;
     }
     .section-intro {
         padding: 18px 20px;
         background: linear-gradient(180deg, rgba(24,24,27,.86), rgba(15,17,23,.74));
+        text-align: center;
     }
     .section-intro span, .app-hero .eyebrow {
         color: var(--accent);
@@ -1492,7 +1496,11 @@ st.markdown(
     div[data-testid="stFormSubmitButton"] button,
     [data-testid="baseButton-secondary"],
     [data-testid="baseButton-primary"] {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
         min-height: 42px;
+        padding: 10px 16px !important;
         border-radius: 10px;
         border: 1px solid var(--line-strong) !important;
         background: #18181b !important;
@@ -1616,14 +1624,61 @@ st.markdown(
     }
     div[data-testid="stButton"] > button {
         width: 100%;
-        justify-content: flex-start;
-        text-align: left;
+        justify-content: center !important;
+        text-align: center !important;
         white-space: pre-line;
     }
     div[data-testid="stButton"] > button p {
         color: inherit !important;
         font-weight: 700 !important;
         line-height: 1.35 !important;
+        width: 100%;
+        text-align: center !important;
+        margin: 0 auto !important;
+    }
+    div[data-testid="stFormSubmitButton"] > button p {
+        width: 100%;
+        text-align: center !important;
+        margin: 0 auto !important;
+    }
+    [data-testid="stMarkdownContainer"] {
+        text-align: inherit;
+    }
+    .metric-cell,
+    .posts-stats div,
+    .account-selection-summary div,
+    .step-note,
+    .blocked-panel,
+    .send-blockers {
+        text-align: center;
+    }
+    .metric-cell span,
+    .metric-cell small,
+    .metric-cell strong,
+    .posts-stats span,
+    .posts-stats b,
+    .account-selection-summary span,
+    .account-selection-summary strong {
+        text-align: center;
+    }
+    .posts-editor-wrap,
+    div[data-testid="stDataFrame"],
+    div[data-testid="stDataFrameResizable"] {
+        width: 100% !important;
+        margin: 14px auto 20px auto !important;
+    }
+    div[data-testid="stDataFrame"] [role="columnheader"],
+    div[data-testid="stDataFrame"] [role="gridcell"] {
+        text-align: center !important;
+        justify-content: center !important;
+    }
+    table, th, td {
+        text-align: center !important;
+        vertical-align: middle !important;
+    }
+    [data-testid="stHorizontalBlock"] {
+        align-items: center !important;
+        gap: 1rem !important;
     }
     [data-baseweb="input"],
     [data-baseweb="base-input"],
