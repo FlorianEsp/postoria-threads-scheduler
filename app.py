@@ -169,7 +169,7 @@ def scheduled_dataframe(rows: list[dict]) -> pd.DataFrame:
         return df
     now = datetime.now(ZoneInfo(APP_TZ))
     df.loc[:, "day"] = df["scheduled_time_local"].astype(str).str.slice(0, 10)
-    df.loc[:, "time"] = df["scheduled_time_local"].astype(str).str.slice(11, 16)
+    df.loc[:, "time"] = df["scheduled_time_local"].astype(str).str.slice(11, 19)
     df.loc[:, "group_name"] = df["group_name"].fillna("Sans groupe")
     parsed_times = df["scheduled_time_local"].apply(parse_local_scheduled)
     df.loc[:, "time_state"] = parsed_times.apply(

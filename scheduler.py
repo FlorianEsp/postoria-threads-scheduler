@@ -157,8 +157,9 @@ def generate_schedule(
             else:
                 minute_offsets = [slot * min_interval_minutes for slot in range(account_post_count)]
 
+            account_second_offset = rng.randint(7, 53)
             for slot in range(account_post_count):
-                scheduled_at = account_start + timedelta(minutes=minute_offsets[slot])
+                scheduled_at = account_start + timedelta(minutes=minute_offsets[slot], seconds=account_second_offset)
                 if scheduled_at > end_dt:
                     raise ValueError(f"Impossible de placer tous les posts pour {account.get('name')} dans le timeframe.")
 
