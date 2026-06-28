@@ -529,13 +529,8 @@ def render_flow_status(
     analytics_ready: bool,
     send_ready: bool,
 ) -> int:
-    raw_step = st.query_params.get("step", "0") if hasattr(st, "query_params") else "0"
-    if isinstance(raw_step, list):
-        raw_step = raw_step[0] if raw_step else "0"
-    try:
-        active_step = min(5, max(0, int(raw_step)))
-    except (TypeError, ValueError):
-        active_step = 0
+    active_step = int(st.session_state.get("active_step", 0))
+    active_step = min(5, max(0, active_step))
     steps = [
         ("1", "Comptes", accounts_ready),
         ("2", "Cadence", cadence_ready),
@@ -544,17 +539,18 @@ def render_flow_status(
         ("5", "Analytics", analytics_ready),
         ("6", "Envoi", send_ready),
     ]
-    items = []
+    cols = st.columns([1.15, .85, 1.05, .8, .95, .8])
     for idx, (number, label, ready) in enumerate(steps):
-        state = "is-active" if idx == active_step else ("is-done" if ready else "is-pending")
-        items.append(
-            f"<a class='flow-step {state}' href='?step={idx}'>"
-            f"<span>{number}</span>"
-            f"<strong>{h(label)}</strong>"
-            f"<small>{'OK' if ready else 'À faire'}</small>"
-            "</a>"
-        )
-    st.markdown("<div class='flow-rail'>" + "".join(items) + "</div>", unsafe_allow_html=True)
+        status = "OK" if ready else "À faire"
+        active_mark = "● " if idx == active_step else ""
+        with cols[idx]:
+            if st.button(
+                f"{active_mark}{number}  {label}\n{status}",
+                key=f"step_nav_{idx}",
+                use_container_width=True,
+            ):
+                st.session_state["active_step"] = idx
+                active_step = idx
     return active_step
 
 
