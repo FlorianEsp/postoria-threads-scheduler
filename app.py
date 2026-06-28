@@ -167,9 +167,14 @@ def scheduled_dataframe(rows: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(rows).copy()
     if df.empty:
         return df
+    now = datetime.now(ZoneInfo(APP_TZ))
     df.loc[:, "day"] = df["scheduled_time_local"].astype(str).str.slice(0, 10)
     df.loc[:, "time"] = df["scheduled_time_local"].astype(str).str.slice(11, 16)
     df.loc[:, "group_name"] = df["group_name"].fillna("Sans groupe")
+    parsed_times = df["scheduled_time_local"].apply(parse_local_scheduled)
+    df.loc[:, "time_state"] = parsed_times.apply(
+        lambda value: "Déjà passé / à vérifier" if value is not None and value <= now else "À poster"
+    )
     df.loc[:, "photos"] = df["media_ids"].apply(lambda value: len(value or []))
     df.loc[:, "text"] = df["caption"].astype(str).str.slice(0, 140)
     df.loc[:, "error"] = df.get("error", "").fillna("") if "error" in df.columns else ""
@@ -264,18 +269,33 @@ def is_failed_status(row: dict) -> bool:
 
 
 def schedule_category_counts(rows: list[dict]) -> dict[str, int]:
-    preview_count = sum(1 for row in rows if str(row.get("status")) == "preview")
+    now = datetime.now(ZoneInfo(APP_TZ))
+    preview_future_count = sum(
+        1 for row in rows
+        if str(row.get("status")) == "preview" and not is_past_scheduled(row, now)
+    )
+    preview_past_count = sum(
+        1 for row in rows
+        if str(row.get("status")) == "preview" and is_past_scheduled(row, now)
+    )
     saved_preview_count = sum(1 for row in rows if str(row.get("status")) == "preview_saved")
     failed_count = sum(1 for row in rows if is_failed_status(row))
-    planned_count = sum(
+    planned_future_count = sum(
         1
         for row in rows
-        if str(row.get("status")) not in ("preview", "preview_saved") and not is_failed_status(row)
+        if str(row.get("status")) not in ("preview", "preview_saved") and not is_failed_status(row) and not is_past_scheduled(row, now)
+    )
+    planned_past_count = sum(
+        1
+        for row in rows
+        if str(row.get("status")) not in ("preview", "preview_saved") and not is_failed_status(row) and is_past_scheduled(row, now)
     )
     return {
-        "Preview brouillon": preview_count,
+        "Preview à poster": preview_future_count,
+        "Preview déjà passée": preview_past_count,
         "Anciennes previews": saved_preview_count,
-        "Déjà planifiés": planned_count,
+        "Planifiés à venir": planned_future_count,
+        "Déjà passés / à vérifier": planned_past_count,
         "Failed": failed_count,
         "Tout": len(rows),
     }
@@ -371,11 +391,26 @@ def parse_day(value) -> date | None:
         return None
 
 
+def parse_local_scheduled(value) -> datetime | None:
+    try:
+        return datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo(APP_TZ))
+    except ValueError:
+        return None
+
+
+def is_past_scheduled(row: dict, now: datetime | None = None) -> bool:
+    scheduled_at = parse_local_scheduled(row.get("scheduled_time_local"))
+    if scheduled_at is None:
+        return False
+    now = now or datetime.now(ZoneInfo(APP_TZ))
+    return scheduled_at <= now
+
+
 def max_posts_for_window(start: time, end: time, min_gap: int) -> int:
     minutes = window_minutes(start, end)
     if minutes <= 0:
         return 0
-    return floor(minutes / max(1, min_gap)) + 1
+    return floor(minutes / max(1, min_gap))
 
 
 def distribution_sentence(current: dict) -> str:
@@ -2182,27 +2217,48 @@ with tabs[3]:
                             st.rerun()
         category_counts = schedule_category_counts(all_scheduled)
         category_labels = [
-            f"Preview brouillon ({category_counts['Preview brouillon']})",
+            f"Preview à poster ({category_counts['Preview à poster']})",
+            f"Preview déjà passée ({category_counts['Preview déjà passée']})",
             f"Anciennes previews ({category_counts['Anciennes previews']})",
-            f"Déjà planifiés ({category_counts['Déjà planifiés']})",
+            f"Planifiés à venir ({category_counts['Planifiés à venir']})",
+            f"Déjà passés / à vérifier ({category_counts['Déjà passés / à vérifier']})",
             f"Failed ({category_counts['Failed']})",
             f"Tout ({category_counts['Tout']})",
         ]
+        now_local = datetime.now(ZoneInfo(APP_TZ))
+        st.caption(f"Heure utilisée pour classer la preview : {now_local.strftime('%Y-%m-%d %H:%M:%S')} ({APP_TZ}).")
         category_choice = st.radio(
             "Catégorie",
             category_labels,
             horizontal=True,
-            help="La preview est le brouillon du nouveau lot. Les posts déjà planifiés/envoyés restent dans leur catégorie séparée.",
+            help="La séparation à poster/déjà passée utilise l'heure locale de l'appareil/app. Déjà passée ne prouve pas que Threads a publié: vérifie le statut ou ouvre le compte.",
         )
         category = category_choice.split(" (", 1)[0]
-        if category == "Preview brouillon":
-            category_rows = [row for row in all_scheduled if str(row.get("status")) == "preview"]
-        elif category == "Anciennes previews":
-            category_rows = [row for row in all_scheduled if str(row.get("status")) == "preview_saved"]
-        elif category == "Déjà planifiés":
+        if category == "Preview à poster":
             category_rows = [
                 row for row in all_scheduled
-                if str(row.get("status")) not in ("preview", "preview_saved") and not is_failed_status(row)
+                if str(row.get("status")) == "preview" and not is_past_scheduled(row, now_local)
+            ]
+        elif category == "Preview déjà passée":
+            category_rows = [
+                row for row in all_scheduled
+                if str(row.get("status")) == "preview" and is_past_scheduled(row, now_local)
+            ]
+        elif category == "Anciennes previews":
+            category_rows = [row for row in all_scheduled if str(row.get("status")) == "preview_saved"]
+        elif category == "Planifiés à venir":
+            category_rows = [
+                row for row in all_scheduled
+                if str(row.get("status")) not in ("preview", "preview_saved")
+                and not is_failed_status(row)
+                and not is_past_scheduled(row, now_local)
+            ]
+        elif category == "Déjà passés / à vérifier":
+            category_rows = [
+                row for row in all_scheduled
+                if str(row.get("status")) not in ("preview", "preview_saved")
+                and not is_failed_status(row)
+                and is_past_scheduled(row, now_local)
             ]
         elif category == "Failed":
             category_rows = [row for row in all_scheduled if is_failed_status(row)]
@@ -2253,7 +2309,7 @@ with tabs[3]:
             if not failed_rows.empty:
                 st.error(f"{len(failed_rows)} posts failed/error. Question: corriger les posts, relancer ces comptes, ou supprimer ces programmations ?")
 
-            visible_cols = ["day", "time", "preview_batch", "account_name", "threads_url", "group_name", "status", "photos", "replies", "text", "error"]
+            visible_cols = ["day", "time", "time_state", "preview_batch", "account_name", "threads_url", "group_name", "status", "photos", "replies", "text", "error"]
             column_config = {
                 "threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir"),
             }
