@@ -2530,6 +2530,15 @@ with tabs[5]:
     total_photos = sum(len(row.get("media_ids") or []) for row in preview)
     total_replies = sum(len(row.get("chain_replies") or []) for row in preview)
     st.write(f"{len(preview)} posts en preview, {total_photos} media IDs attachés.")
+    clear_col, keep_col = st.columns([1, 2])
+    with clear_col:
+        if st.button("Tout enlever de la preview", disabled=not preview, use_container_width=True):
+            db.clear_preview()
+            st.session_state.pop("preview_rows", None)
+            st.warning("Preview vidée. Rien supprimé sur Postoria.")
+            st.rerun()
+    with keep_col:
+        st.caption("Action locale: enlève seulement les posts en preview brouillon. Posts déjà programmés/envoyés restent conservés.")
     if total_replies:
         st.warning(f"{total_replies} replies en thread chain sont en preview. Envoi Postoria actuel publie seulement le post principal.")
 
