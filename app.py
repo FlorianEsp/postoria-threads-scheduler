@@ -444,6 +444,70 @@ def planned_total_range(account_count: int, posts_min: int, posts_max: int) -> t
     return account_count * posts_min, account_count * posts_max
 
 
+def parse_utc_scheduled(value) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo("UTC"))
+    except ValueError:
+        return None
+
+
+def response_get_nested(data: dict, *path):
+    current = data
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def postoria_response_id(response) -> int | None:
+    if not isinstance(response, dict):
+        return None
+    candidates = [
+        response.get("id"),
+        response.get("post_id"),
+        response.get("postoria_post_id"),
+        response_get_nested(response, "data", "id"),
+        response_get_nested(response, "post", "id"),
+        response_get_nested(response, "data", "post", "id"),
+    ]
+    for candidate in candidates:
+        if candidate is None or str(candidate).strip() == "":
+            continue
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def postoria_response_status(response) -> str:
+    if not isinstance(response, dict):
+        return "scheduled"
+    candidates = [
+        response.get("status"),
+        response_get_nested(response, "data", "status"),
+        response_get_nested(response, "post", "status"),
+        response_get_nested(response, "data", "post", "status"),
+    ]
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return "scheduled"
+
+
+def short_debug(value, limit: int = 500) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def h(value) -> str:
     return escape(str(value or ""), quote=True)
 
@@ -2201,22 +2265,50 @@ if active_step == 1:
         )
     else:
         current = settings()
+        cadence_signature = (
+            current["publish_date"],
+            current["start_time"],
+            current["end_time"],
+            current["count_mode"],
+            int(current["posts_min"]),
+            int(current["posts_max"]),
+            int(current["min_interval"]),
+            bool(current.get("avoid_same_text", False)),
+            int(current.get("same_text_gap", 60)),
+            current["caption_mode"],
+        )
+        if st.session_state.get("_cadence_form_signature") != cadence_signature:
+            st.session_state["cadence_publish_date"] = current["publish_date"]
+            st.session_state["cadence_start_time"] = current["start_time"]
+            st.session_state["cadence_end_time"] = current["end_time"]
+            st.session_state["cadence_count_mode"] = current["count_mode"]
+            st.session_state["cadence_posts_min"] = int(current["posts_min"])
+            st.session_state["cadence_posts_max"] = int(current["posts_max"])
+            st.session_state["cadence_min_interval"] = int(current["min_interval"])
+            st.session_state["cadence_avoid_same_text"] = bool(current.get("avoid_same_text", False))
+            st.session_state["cadence_same_text_gap"] = int(current.get("same_text_gap", 60))
+            st.session_state["cadence_caption_mode"] = current["caption_mode"]
+            st.session_state["_cadence_form_signature"] = cadence_signature
         with st.form("cadence_settings_form"):
             q1, q2, q3 = st.columns(3)
             with q1:
-                publish_date = st.date_input("Date", value=current["publish_date"])
-                caption_mode = st.radio("Ordre des textes", ["Rotate", "Random"], horizontal=True, index=0 if current["caption_mode"] == "Rotate" else 1)
+                publish_date = st.date_input("Date", key="cadence_publish_date")
+                caption_mode = st.radio("Ordre des textes", ["Rotate", "Random"], horizontal=True, key="cadence_caption_mode")
             with q2:
-                start_time = st.time_input("Début", value=current["start_time"])
-                end_time = st.time_input("Fin", value=current["end_time"])
+                start_time = st.time_input("Début", key="cadence_start_time")
+                end_time = st.time_input("Fin", key="cadence_end_time")
             with q3:
-                count_mode = st.radio("Posts par compte", ["Exact", "Range"], horizontal=True, index=0 if current["count_mode"] == "Exact" else 1)
+                count_mode = st.radio("Posts par compte", ["Exact", "Range"], horizontal=True, key="cadence_count_mode")
+                rp1, rp2 = st.columns(2)
+                with rp1:
+                    posts_min = st.number_input("Exact / Min", min_value=0, max_value=50, step=1, key="cadence_posts_min")
+                with rp2:
+                    posts_max_input = st.number_input("Max", min_value=0, max_value=50, step=1, key="cadence_posts_max")
+                posts_max = int(posts_min) if count_mode == "Exact" else max(int(posts_max_input), int(posts_min))
                 if count_mode == "Exact":
-                    posts_min = st.number_input("Nombre exact", min_value=0, max_value=50, value=int(current["posts_min"]), step=1)
-                    posts_max = posts_min
-                else:
-                    posts_min = st.number_input("Min", min_value=0, max_value=50, value=int(current["posts_min"]), step=1)
-                    posts_max = st.number_input("Max", min_value=int(posts_min), max_value=50, value=max(int(current["posts_max"]), int(posts_min)), step=1)
+                    st.caption("Mode Exact: seul le champ Exact / Min est utilisé.")
+                elif int(posts_max_input) < int(posts_min):
+                    st.warning("Max corrigé automatiquement au niveau du Min.")
 
             q4, q5 = st.columns([1, 1])
             with q4:
@@ -2224,8 +2316,8 @@ if active_step == 1:
                     "Écart min entre 2 posts du même compte (min)",
                     min_value=1,
                     max_value=1440,
-                    value=int(current["min_interval"]),
                     step=1,
+                    key="cadence_min_interval",
                     help="Écris la valeur complète, puis clique sur Appliquer cadence. Plus de reset pendant la frappe.",
                 )
             with q5:
@@ -2247,14 +2339,14 @@ if active_step == 1:
 
             avoid_same_text = st.checkbox(
                 "Éviter le même texte sur deux comptes trop proches",
-                value=bool(current.get("avoid_same_text", False)),
+                key="cadence_avoid_same_text",
             )
             same_text_gap = st.number_input(
                 "Écart min pour réutiliser le même texte sur un autre compte (min)",
                 min_value=1,
                 max_value=1440,
-                value=int(current.get("same_text_gap", 60)),
                 step=1,
+                key="cadence_same_text_gap",
                 disabled=not avoid_same_text,
             )
             apply_cadence = st.form_submit_button("Appliquer cadence", type="primary", use_container_width=True)
@@ -2272,6 +2364,18 @@ if active_step == 1:
                 "same_text_gap": int(same_text_gap),
                 "caption_mode": caption_mode,
             }
+            st.session_state["_cadence_form_signature"] = (
+                publish_date,
+                start_time,
+                end_time,
+                count_mode,
+                int(posts_min),
+                int(posts_max),
+                int(min_interval),
+                bool(avoid_same_text),
+                int(same_text_gap),
+                caption_mode,
+            )
             clear_preview_draft("Preview brouillon supprimée: cadence changée. Les posts déjà planifiés restent conservés.")
             st.success("Cadence appliquée.")
         st.info(distribution_sentence(settings()))
@@ -2851,7 +2955,13 @@ if active_step == 5:
     preview = db.list_scheduled("preview")
     total_photos = sum(len(row.get("media_ids") or []) for row in preview)
     total_replies = sum(len(row.get("chain_replies") or []) for row in preview)
+    preview_past = [row for row in preview if is_past_scheduled(row)]
     st.write(f"{len(preview)} posts en preview, {total_photos} media IDs attachés.")
+    if preview_past:
+        st.error(
+            f"{len(preview_past)} posts de la preview ont déjà une heure passée. "
+            "Regénère la preview avec une date/heure future avant envoi."
+        )
     clear_col, keep_col = st.columns([1, 2])
     with clear_col:
         if st.button("Tout enlever de la preview", disabled=not preview, use_container_width=True):
@@ -2876,6 +2986,8 @@ if active_step == 5:
         send_blockers.append("pas de posts")
     if not preview:
         send_blockers.append("pas de preview")
+    if preview_past:
+        send_blockers.append(f"{len(preview_past)} horaires déjà passés")
     if not api_exists or not client:
         send_blockers.append("API manquante")
     if dry_run:
@@ -2894,24 +3006,67 @@ if active_step == 5:
             st.error("Client Postoria ou workspace manquant.")
         else:
             failures = defaultdict(int)
-            for row in preview:
-                if failures[row["account_id"]] >= 2:
-                    db.update_scheduled_result(row["id"], None, "skipped", "Compte désactivé après 2 échecs d'affilée")
+            sent_count = 0
+            failed_count = 0
+            skipped_count = 0
+            error_rows = []
+            now_utc = datetime.now(ZoneInfo("UTC"))
+            progress = st.progress(0, text="Envoi Postoria en cours...")
+            for index, row in enumerate(preview, start=1):
+                account_id = int(row["account_id"])
+                if failures[account_id] >= 2:
+                    skipped_count += 1
+                    error = "Compte ignoré après 2 échecs dans ce lot"
+                    db.update_scheduled_result(row["id"], None, "skipped", error)
+                    error_rows.append({
+                        "id": row["id"],
+                        "compte": row["account_name"],
+                        "heure": row["scheduled_time_local"],
+                        "erreur": error,
+                    })
+                    progress.progress(index / len(preview), text=f"Envoi Postoria {index}/{len(preview)}")
                     continue
                 try:
+                    scheduled_utc = parse_utc_scheduled(row.get("scheduled_time_utc"))
+                    if scheduled_utc is None:
+                        raise RuntimeError(f"Heure UTC invalide: {row.get('scheduled_time_utc')}")
+                    if scheduled_utc <= now_utc + timedelta(seconds=30):
+                        raise RuntimeError(
+                            f"Heure déjà passée ou trop proche ({row.get('scheduled_time_utc')}). "
+                            "Regénère une preview future."
+                        )
                     res = client.create_post(
                         int(workspace_id),
-                        int(row["account_id"]),
+                        account_id,
                         row["caption"],
                         row["scheduled_time_utc"],
                         row.get("media_ids") or [],
                     )
-                    db.update_scheduled_result(row["id"], res.get("id"), res.get("status", "scheduled"), None)
-                    failures[row["account_id"]] = 0
+                    postoria_id = postoria_response_id(res)
+                    postoria_status = postoria_response_status(res)
+                    if postoria_id is None:
+                        raise RuntimeError(f"Réponse Postoria sans post id: {short_debug(res)}")
+                    db.update_scheduled_result(row["id"], postoria_id, postoria_status, None)
+                    failures[account_id] = 0
+                    sent_count += 1
                 except Exception as e:
-                    failures[row["account_id"]] += 1
-                    db.update_scheduled_result(row["id"], None, "failed", str(e))
-            st.success("Traitement terminé.")
+                    failures[account_id] += 1
+                    failed_count += 1
+                    error = short_debug(e)
+                    db.update_scheduled_result(row["id"], None, "failed", error)
+                    error_rows.append({
+                        "id": row["id"],
+                        "compte": row["account_name"],
+                        "heure": row["scheduled_time_local"],
+                        "erreur": error,
+                    })
+                progress.progress(index / len(preview), text=f"Envoi Postoria {index}/{len(preview)}")
+            progress.empty()
+            if failed_count or skipped_count:
+                st.error(f"Envoi terminé: {sent_count} envoyés, {failed_count} failed, {skipped_count} ignorés.")
+                st.dataframe(pd.DataFrame(error_rows), use_container_width=True, hide_index=True)
+            else:
+                st.success(f"Envoi terminé: {sent_count} posts programmés sur Postoria.")
 
     if st.button("Vérifier statuts Postoria"):
         if not client or not workspace_id:
@@ -2922,10 +3077,10 @@ if active_step == 5:
                 if row.get("postoria_post_id"):
                     try:
                         res = client.get_post(int(workspace_id), int(row["postoria_post_id"]))
-                        db.update_scheduled_result(row["id"], row["postoria_post_id"], res.get("status", "unknown"), None)
+                        db.update_scheduled_result(row["id"], row["postoria_post_id"], postoria_response_status(res), None)
                         checked += 1
                     except Exception as e:
-                        db.update_scheduled_result(row["id"], row["postoria_post_id"], "status_error", str(e))
+                        db.update_scheduled_result(row["id"], row["postoria_post_id"], "status_error", short_debug(e))
             st.success(f"Statuts mis à jour pour {checked} posts Postoria.")
 
     st.caption("Aucune suppression Postoria n'est disponible dans cette app. Les posts envoyés restent conservés côté Postoria.")

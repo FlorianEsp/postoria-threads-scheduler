@@ -98,7 +98,7 @@ def generate_schedule(
     schedule_seed: int | None = None,
 ) -> list[dict]:
     min_posts = int(posts_per_account)
-    max_posts = int(posts_per_account_max or posts_per_account)
+    max_posts = int(posts_per_account if posts_per_account_max is None else posts_per_account_max)
     if min_posts < 0 or max_posts < min_posts:
         raise ValueError("Le nombre de posts par compte est invalide.")
     if max_posts == 0:
