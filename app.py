@@ -1911,43 +1911,50 @@ if active_step == 1:
         )
     else:
         current = settings()
-        q1, q2, q3 = st.columns(3)
-        with q1:
-            publish_date = st.date_input("Date", value=current["publish_date"])
-            caption_mode = st.radio("Ordre des textes", ["Rotate", "Random"], horizontal=True, index=0 if current["caption_mode"] == "Rotate" else 1)
-        with q2:
-            start_time = st.time_input("Début", value=current["start_time"])
-            end_time = st.time_input("Fin", value=current["end_time"])
-        with q3:
-            count_mode = st.radio("Posts par compte", ["Exact", "Range"], horizontal=True, index=0 if current["count_mode"] == "Exact" else 1)
-            if count_mode == "Exact":
-                posts_min = st.number_input("Nombre exact", min_value=0, max_value=50, value=int(current["posts_min"]), step=1)
-                posts_max = posts_min
-            else:
-                posts_min = st.number_input("Min", min_value=0, max_value=50, value=int(current["posts_min"]), step=1)
-                posts_max = st.number_input("Max", min_value=int(posts_min), max_value=50, value=max(int(current["posts_max"]), int(posts_min)), step=1)
+        with st.form("cadence_settings_form"):
+            q1, q2, q3 = st.columns(3)
+            with q1:
+                publish_date = st.date_input("Date", value=current["publish_date"])
+                caption_mode = st.radio("Ordre des textes", ["Rotate", "Random"], horizontal=True, index=0 if current["caption_mode"] == "Rotate" else 1)
+            with q2:
+                start_time = st.time_input("Début", value=current["start_time"])
+                end_time = st.time_input("Fin", value=current["end_time"])
+            with q3:
+                count_mode = st.radio("Posts par compte", ["Exact", "Range"], horizontal=True, index=0 if current["count_mode"] == "Exact" else 1)
+                if count_mode == "Exact":
+                    posts_min = st.number_input("Nombre exact", min_value=0, max_value=50, value=int(current["posts_min"]), step=1)
+                    posts_max = posts_min
+                else:
+                    posts_min = st.number_input("Min", min_value=0, max_value=50, value=int(current["posts_min"]), step=1)
+                    posts_max = st.number_input("Max", min_value=int(posts_min), max_value=50, value=max(int(current["posts_max"]), int(posts_min)), step=1)
 
-        q4, q5 = st.columns(2)
-        with q4:
-            min_interval = st.number_input("Écart min entre 2 posts du même compte (min)", min_value=1, max_value=1440, value=int(current["min_interval"]), step=5)
-        with q5:
-            max_possible = max_posts_for_window(start_time, end_time, int(min_interval))
-            selected_count = len(st.session_state.get("selected_accounts", []))
-            total_min, total_max = planned_total_range(selected_count, int(posts_min), int(posts_max))
-            st.metric("Comptes sélectionnés", selected_count)
-            st.caption(planned_total_sentence(selected_count, int(posts_min), int(posts_max), max_possible))
-            st.caption(f"Total à créer : {total_min if total_min == total_max else f'{total_min}-{total_max}'} publications.")
-            st.caption(f"Capacité horaire calculée : {max_possible} posts max par compte.")
-            if int(posts_max) > max_possible:
-                st.error(
-                    f"Question à trancher : avec {start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')} "
-                    f"et {int(min_interval)}min d'écart, chaque compte peut recevoir {max_possible} posts max. "
-                    "Réduis posts par compte, baisse l'écart, ou élargis la plage."
+            q4, q5 = st.columns([1, 1])
+            with q4:
+                min_interval = st.number_input(
+                    "Écart min entre 2 posts du même compte (min)",
+                    min_value=1,
+                    max_value=1440,
+                    value=int(current["min_interval"]),
+                    step=1,
+                    help="Écris la valeur complète, puis clique sur Appliquer cadence. Plus de reset pendant la frappe.",
                 )
-            if int(posts_max) == 0:
-                st.warning("0 post par compte: la prochaine preview sera vide et remplacera le brouillon courant.")
+            with q5:
+                max_possible = max_posts_for_window(start_time, end_time, int(min_interval))
+                selected_count = len(st.session_state.get("selected_accounts", []))
+                total_min, total_max = planned_total_range(selected_count, int(posts_min), int(posts_max))
+                st.metric("Comptes sélectionnés", selected_count)
+                st.caption(planned_total_sentence(selected_count, int(posts_min), int(posts_max), max_possible))
+                st.caption(f"Total à créer : {total_min if total_min == total_max else f'{total_min}-{total_max}'} publications.")
+                st.caption(f"Capacité horaire calculée : {max_possible} posts max par compte.")
+                if int(posts_max) > max_possible:
+                    st.error(
+                        f"Question à trancher : avec {start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')} "
+                        f"et {int(min_interval)}min d'écart, chaque compte peut recevoir {max_possible} posts max. "
+                        "Réduis posts par compte, baisse l'écart, ou élargis la plage."
+                    )
+                if int(posts_max) == 0:
+                    st.warning("0 post par compte: la prochaine preview sera vide et remplacera le brouillon courant.")
 
-        with st.expander("Option anti-doublon texte entre comptes"):
             avoid_same_text = st.checkbox(
                 "Éviter le même texte sur deux comptes trop proches",
                 value=bool(current.get("avoid_same_text", False)),
@@ -1957,22 +1964,26 @@ if active_step == 1:
                 min_value=1,
                 max_value=1440,
                 value=int(current.get("same_text_gap", 60)),
-                step=5,
+                step=1,
                 disabled=not avoid_same_text,
             )
+            apply_cadence = st.form_submit_button("Appliquer cadence", type="primary", use_container_width=True)
 
-        st.session_state["settings"] = {
-            "publish_date": publish_date,
-            "start_time": start_time,
-            "end_time": end_time,
-            "count_mode": count_mode,
-            "posts_min": int(posts_min),
-            "posts_max": int(posts_max),
-            "min_interval": int(min_interval),
-            "avoid_same_text": bool(avoid_same_text),
-            "same_text_gap": int(same_text_gap),
-            "caption_mode": caption_mode,
-        }
+        if apply_cadence:
+            st.session_state["settings"] = {
+                "publish_date": publish_date,
+                "start_time": start_time,
+                "end_time": end_time,
+                "count_mode": count_mode,
+                "posts_min": int(posts_min),
+                "posts_max": int(posts_max),
+                "min_interval": int(min_interval),
+                "avoid_same_text": bool(avoid_same_text),
+                "same_text_gap": int(same_text_gap),
+                "caption_mode": caption_mode,
+            }
+            clear_preview_draft("Preview brouillon supprimée: cadence changée. Les posts déjà planifiés restent conservés.")
+            st.success("Cadence appliquée.")
         st.info(distribution_sentence(settings()))
 
 if active_step == 2:
