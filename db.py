@@ -437,6 +437,10 @@ def media_folder_map() -> dict[str, list[str]]:
 def save_preview(rows: list[dict[str, Any]], name: str | None = None) -> str:
     from datetime import datetime
 
+    if not rows:
+        clear_preview()
+        return "empty"
+
     batch_id = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
     batch_name = str(name or "").strip() or f"Preview {batch_id}"
     with connect() as conn:

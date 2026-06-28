@@ -97,13 +97,14 @@ def generate_schedule(
     media_library: dict[str, list[str]] | None = None,
     schedule_seed: int | None = None,
 ) -> list[dict]:
-    if not selected_posts:
-        raise ValueError("Aucun post sélectionné.")
-
     min_posts = int(posts_per_account)
     max_posts = int(posts_per_account_max or posts_per_account)
-    if min_posts < 1 or max_posts < min_posts:
+    if min_posts < 0 or max_posts < min_posts:
         raise ValueError("Le nombre de posts par compte est invalide.")
+    if max_posts == 0:
+        return []
+    if not selected_posts:
+        raise ValueError("Aucun post sélectionné.")
 
     tz = ZoneInfo(tz_name)
     start_dt = datetime.combine(publish_date, start_time).replace(tzinfo=tz)

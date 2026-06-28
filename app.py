@@ -414,6 +414,11 @@ def max_posts_for_window(start: time, end: time, min_gap: int) -> int:
 
 
 def distribution_sentence(current: dict) -> str:
+    if int(current.get("posts_max", 0)) == 0:
+        return (
+            "Mode 0 post: aucune publication ne sera créée. "
+            "Générer une preview dans ce mode vide le brouillon courant sans toucher aux posts déjà planifiés/envoyés."
+        )
     if current["count_mode"] == "Range":
         count = f"entre {current['posts_min']} et {current['posts_max']}"
     else:
@@ -1481,7 +1486,7 @@ current = settings()
 capacity_now = max_posts_for_window(current["start_time"], current["end_time"], int(current["min_interval"]))
 accounts_ready = selected_accounts_count > 0
 cadence_ready = accounts_ready and int(current["posts_max"]) <= capacity_now
-posts_ready = selected_posts_count > 0
+posts_ready = selected_posts_count > 0 or int(current["posts_max"]) == 0
 preview_ready = len(preview) > 0
 analytics_ready = len(db.list_scheduled()) > 0
 send_ready = preview_ready and api_exists and not dry_run
@@ -1906,10 +1911,10 @@ with tabs[1]:
         with q3:
             count_mode = st.radio("Posts par compte", ["Exact", "Range"], horizontal=True, index=0 if current["count_mode"] == "Exact" else 1)
             if count_mode == "Exact":
-                posts_min = st.number_input("Nombre exact", min_value=1, max_value=50, value=int(current["posts_min"]), step=1)
+                posts_min = st.number_input("Nombre exact", min_value=0, max_value=50, value=int(current["posts_min"]), step=1)
                 posts_max = posts_min
             else:
-                posts_min = st.number_input("Min", min_value=1, max_value=50, value=int(current["posts_min"]), step=1)
+                posts_min = st.number_input("Min", min_value=0, max_value=50, value=int(current["posts_min"]), step=1)
                 posts_max = st.number_input("Max", min_value=int(posts_min), max_value=50, value=max(int(current["posts_max"]), int(posts_min)), step=1)
 
         q4, q5 = st.columns(2)
@@ -1929,6 +1934,8 @@ with tabs[1]:
                     f"et {int(min_interval)}min d'écart, chaque compte peut recevoir {max_possible} posts max. "
                     "Réduis posts par compte, baisse l'écart, ou élargis la plage."
                 )
+            if int(posts_max) == 0:
+                st.warning("0 post par compte: la prochaine preview sera vide et remplacera le brouillon courant.")
 
         with st.expander("Option anti-doublon texte entre comptes"):
             avoid_same_text = st.checkbox(
@@ -1982,6 +1989,11 @@ with tabs[2]:
                 f"Demande actuelle: {int(current['posts_max'])} posts max par compte.",
                 "Va dans 2. Cadence et ajuste la plage horaire, l'intervalle ou le range.",
             ],
+        )
+    elif int(current["posts_max"]) == 0:
+        st.info(
+            "Cadence à 0: aucun post n'est requis. Va dans 4. Preview et clique sur Générer preview "
+            "pour vider le brouillon courant sans toucher aux posts déjà planifiés/envoyés."
         )
     else:
         st.info(
@@ -2251,9 +2263,9 @@ with tabs[3]:
     current = settings()
     capacity = max_posts_for_window(current["start_time"], current["end_time"], int(current["min_interval"]))
     enough_context = (
-        bool(st.session_state.get("selected_posts"))
-        and bool(st.session_state.get("grouped_accounts"))
+        bool(st.session_state.get("grouped_accounts"))
         and int(current["posts_max"]) <= capacity
+        and (int(current["posts_max"]) == 0 or bool(st.session_state.get("selected_posts")))
     )
     if not enough_context:
         blockers = []
@@ -2261,7 +2273,7 @@ with tabs[3]:
             blockers.append("Aucun compte sélectionné.")
         if int(current["posts_max"]) > capacity:
             blockers.append("Cadence impossible avec la plage horaire et l'intervalle actuels.")
-        if not st.session_state.get("selected_posts"):
+        if int(current["posts_max"]) > 0 and not st.session_state.get("selected_posts"):
             blockers.append("Aucun post sélectionné.")
         render_locked_step("Preview bloquée: termine les étapes précédentes.", blockers)
     default_batch_name = f"Lot {datetime.now(ZoneInfo(APP_TZ)).strftime('%Y-%m-%d %H:%M')}"
@@ -2290,7 +2302,10 @@ with tabs[3]:
             )
             batch_id = db.save_preview(rows, preview_batch_name)
             st.session_state["preview_rows"] = db.list_scheduled("preview")
-            st.success(f"Planning généré : {len(rows)} posts dans le lot {batch_id}.")
+            if int(current["posts_max"]) == 0:
+                st.warning("Preview vidée: 0 post créé. Les posts déjà planifiés/envoyés sont conservés.")
+            else:
+                st.success(f"Planning généré : {len(rows)} posts dans le lot {batch_id}.")
         except Exception as e:
             st.error(str(e))
 
