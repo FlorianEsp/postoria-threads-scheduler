@@ -728,6 +728,7 @@ def reset_workflow_state(clear_accounts: bool = True, clear_posts: bool = True, 
         st.session_state.pop("preview_rows", None)
     if clear_posts:
         st.session_state["selected_posts"] = []
+        st.session_state["posts_selection_explicit"] = False
     if clear_accounts:
         st.session_state["selected_accounts"] = []
         st.session_state["grouped_accounts"] = {}
@@ -1335,6 +1336,67 @@ st.markdown(
         text-overflow: ellipsis;
         white-space: nowrap;
     }
+    .posts-control-panel {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: linear-gradient(180deg, rgba(244, 246, 251, .052), rgba(244, 246, 251, .026));
+        padding: 14px 16px;
+        margin: 16px 0 14px;
+    }
+    .posts-control-panel strong {
+        display: block;
+        color: var(--text);
+        font-size: 1rem;
+        margin-bottom: 4px;
+    }
+    .posts-control-panel p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.45;
+    }
+    .posts-stats {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--line);
+        margin: 10px 0 14px;
+    }
+    .posts-stats div {
+        background: rgba(17, 19, 24, .68);
+        padding: 12px 14px;
+    }
+    .posts-stats span {
+        display: block;
+        color: var(--faint);
+        font-size: .72rem;
+        font-weight: 820;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+    .posts-stats b {
+        display: block;
+        margin-top: 4px;
+        color: var(--text);
+        font-size: 1.18rem;
+        font-variant-numeric: tabular-nums;
+    }
+    .posts-editor-wrap {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(17, 19, 24, .58);
+        padding: 12px;
+        margin-top: 10px;
+    }
+    .posts-editor-wrap div[data-testid="stDataFrame"] {
+        border-color: rgba(226, 232, 240, .16);
+    }
+    .posts-editor-wrap [data-testid="stDataFrame"] div[role="columnheader"] {
+        color: rgba(203, 213, 225, .78);
+        font-weight: 780;
+    }
     .group-color-preview {
         display: flex;
         gap: 8px;
@@ -1367,6 +1429,9 @@ st.markdown(
         }
         .account-selection-summary {
             grid-template-columns: 1fr;
+        }
+        .posts-stats {
+            grid-template-columns: 1fr 1fr;
         }
         .mobile-account-card {
             display: block;
@@ -1976,6 +2041,7 @@ with tabs[2]:
                     st.session_state["last_imported_csv_hash"] = csv_hash
                     st.session_state["last_imported_csv_name"] = uploaded.name
                     st.session_state["selected_posts"] = imported_posts
+                    st.session_state["posts_selection_explicit"] = True
                     st.session_state["_selected_posts_signature"] = tuple(sorted(imported_ids))
                     st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
                     if imported_ids:
@@ -2009,6 +2075,7 @@ with tabs[2]:
                         if int(post["id"]) in set(imported_ids)
                     ]
                     st.session_state["selected_posts"] = imported_posts
+                    st.session_state["posts_selection_explicit"] = True
                     st.session_state["_selected_posts_signature"] = tuple(sorted(imported_ids))
                     st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
                     if imported_ids:
@@ -2022,7 +2089,59 @@ with tabs[2]:
             st.warning("Aucun post dans la bibliothèque.")
         else:
             selected_post_ids = {int(p["id"]) for p in st.session_state.get("selected_posts", [])}
-            default_posts = not selected_post_ids
+            selection_explicit = bool(st.session_state.get("posts_selection_explicit", False))
+            default_posts = not selection_explicit and not selected_post_ids
+            active_posts = [post for post in posts if bool(post.get("is_active", 1))]
+            posts_with_media = [
+                post for post in active_posts
+                if db.parse_media_ids(post.get("media_ids")) or str(post.get("media_folder") or "").strip()
+            ]
+            selected_count = len(active_posts) if default_posts else len(selected_post_ids)
+            selected_media_count = sum(
+                1
+                for post in posts
+                if bool(post.get("is_active", 1))
+                and (default_posts or int(post["id"]) in selected_post_ids)
+                and (db.parse_media_ids(post.get("media_ids")) or str(post.get("media_folder") or "").strip())
+            )
+            st.markdown(
+                "<div class='posts-control-panel'>"
+                "<strong>Choisir les posts à utiliser</strong>"
+                "<p>Décoche plusieurs lignes tranquillement, puis clique sur Appliquer. Le tableau ne relance plus l'app à chaque clic.</p>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "<div class='posts-stats'>"
+                f"<div><span>Bibliothèque</span><b>{len(posts)}</b></div>"
+                f"<div><span>Sélection</span><b>{selected_count}</b></div>"
+                f"<div><span>Avec média</span><b>{selected_media_count}</b></div>"
+                f"<div><span>Inactifs</span><b>{len(posts) - len(active_posts)}</b></div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            quick_a, quick_b, quick_c = st.columns(3)
+            if quick_a.button("Tout sélectionner", use_container_width=True):
+                clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
+                st.session_state["selected_posts"] = db.list_posts(active_only=True)
+                st.session_state["posts_selection_explicit"] = True
+                st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                st.rerun()
+            if quick_b.button("Tout décocher", use_container_width=True):
+                clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
+                st.session_state["selected_posts"] = []
+                st.session_state["posts_selection_explicit"] = True
+                st.session_state["_selected_posts_signature"] = tuple()
+                st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                st.rerun()
+            if quick_c.button("Seulement avec média", use_container_width=True, disabled=not posts_with_media):
+                clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
+                st.session_state["selected_posts"] = posts_with_media
+                st.session_state["posts_selection_explicit"] = True
+                st.session_state["_selected_posts_signature"] = tuple(sorted(int(post["id"]) for post in posts_with_media))
+                st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                st.rerun()
+
             post_rows = []
             for post in posts:
                 post_rows.append(
@@ -2039,68 +2158,79 @@ with tabs[2]:
                         "used": int(post.get("total_used", 0) or 0),
                     }
                 )
-            edited_posts = st.data_editor(
-                pd.DataFrame(post_rows),
-                hide_index=True,
-                use_container_width=True,
-                height=520,
-                column_config={
-                    "use": st.column_config.CheckboxColumn("Utiliser"),
-                    "active": st.column_config.CheckboxColumn("Actif"),
-                    "id": st.column_config.NumberColumn("ID", disabled=True),
-                    "caption": st.column_config.TextColumn("Texte", disabled=True, width="large"),
-                    "media_ids": st.column_config.TextColumn("Media IDs", width="medium"),
-                    "media_folder": st.column_config.TextColumn("Dossier média", disabled=True),
-                    "variables": st.column_config.TextColumn("Variables", width="medium"),
-                    "reply_chain": st.column_config.TextColumn("Replies", width="medium"),
-                    "photo_note": st.column_config.TextColumn("Note photo", width="medium"),
-                    "used": st.column_config.NumberColumn("Usages", disabled=True),
-                },
-                disabled=["id", "caption", "media_folder", "used"],
-                key=f"posts_editor_{st.session_state.get('posts_editor_version', 0)}",
-            )
-            if st.button("Tout sélectionner"):
-                clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
-                st.session_state["selected_posts"] = db.list_posts(active_only=True)
-                st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
-                st.rerun()
-            if st.button("Sauver posts/photos"):
-                for _, row in edited_posts.iterrows():
-                    db.update_post_metadata(
-                        int(row["id"]),
-                        row["media_ids"],
-                        str(row.get("photo_note", "")),
-                        bool(row["active"]),
-                        str(row.get("media_folder", "")),
-                        parse_variables_text(str(row.get("variables", ""))),
-                        str(row.get("reply_chain", "")),
-                    )
-                if clear_preview_draft("Preview brouillon supprimée: posts/photos modifiés. Les posts déjà planifiés restent conservés."):
-                    st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
-                posts = db.list_posts(active_only=False)
-                st.success("Posts/photos sauvegardés.")
+            with st.form("posts_selection_form"):
+                st.markdown("<div class='posts-editor-wrap'>", unsafe_allow_html=True)
+                edited_posts = st.data_editor(
+                    pd.DataFrame(post_rows),
+                    hide_index=True,
+                    use_container_width=True,
+                    height=560,
+                    column_order=[
+                        "use", "caption", "media_ids", "media_folder", "variables",
+                        "reply_chain", "photo_note", "active", "used", "id",
+                    ],
+                    column_config={
+                        "use": st.column_config.CheckboxColumn("Publier", help="Inclus dans la prochaine preview."),
+                        "active": st.column_config.CheckboxColumn("Actif", help="Désactive le post dans la bibliothèque."),
+                        "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
+                        "caption": st.column_config.TextColumn("Texte", disabled=True, width="large"),
+                        "media_ids": st.column_config.TextColumn("Media IDs", width="medium"),
+                        "media_folder": st.column_config.TextColumn("Dossier", disabled=True, width="small"),
+                        "variables": st.column_config.TextColumn("Variables", width="medium"),
+                        "reply_chain": st.column_config.TextColumn("Replies", width="medium"),
+                        "photo_note": st.column_config.TextColumn("Note photo", width="medium"),
+                        "used": st.column_config.NumberColumn("Usages", disabled=True, width="small"),
+                    },
+                    disabled=["id", "caption", "media_folder", "used"],
+                    key=f"posts_editor_{st.session_state.get('posts_editor_version', 0)}",
+                )
+                st.markdown("</div>", unsafe_allow_html=True)
+                submit_a, submit_b = st.columns([1, 1])
+                apply_posts = submit_a.form_submit_button("Appliquer sélection", type="primary", use_container_width=True)
+                save_posts = submit_b.form_submit_button("Sauver posts/photos", use_container_width=True)
 
-            post_by_id = {int(p["id"]): p for p in db.list_posts(active_only=False)}
-            selected_posts = []
-            for _, row in edited_posts.iterrows():
-                if bool(row["use"]) and bool(row["active"]):
-                    base = post_by_id[int(row["id"])]
-                    selected_posts.append(
-                        {
-                            **base,
-                            "media_ids": db.parse_media_ids(row["media_ids"]),
-                            "media_folder": str(row.get("media_folder", "")),
-                            "variables": parse_variables_text(str(row.get("variables", ""))),
-                            "reply_chain": db.parse_lines(str(row.get("reply_chain", ""))),
-                            "photo_note": str(row.get("photo_note", "")),
-                        }
-                    )
-            st.session_state["selected_posts"] = selected_posts
-            selected_signature = tuple(sorted(int(post["id"]) for post in selected_posts))
-            previous_signature = st.session_state.get("_selected_posts_signature")
-            if previous_signature is not None and previous_signature != selected_signature:
-                clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
-            st.session_state["_selected_posts_signature"] = selected_signature
+            if apply_posts or save_posts:
+                if save_posts:
+                    for _, row in edited_posts.iterrows():
+                        db.update_post_metadata(
+                            int(row["id"]),
+                            row["media_ids"],
+                            str(row.get("photo_note", "")),
+                            bool(row["active"]),
+                            str(row.get("media_folder", "")),
+                            parse_variables_text(str(row.get("variables", ""))),
+                            str(row.get("reply_chain", "")),
+                        )
+                    posts = db.list_posts(active_only=False)
+                    st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+
+                post_by_id = {int(p["id"]): p for p in db.list_posts(active_only=False)}
+                selected_posts = []
+                for _, row in edited_posts.iterrows():
+                    if bool(row["use"]) and bool(row["active"]):
+                        base = post_by_id[int(row["id"])]
+                        selected_posts.append(
+                            {
+                                **base,
+                                "media_ids": db.parse_media_ids(row["media_ids"]),
+                                "media_folder": str(row.get("media_folder", "")),
+                                "variables": parse_variables_text(str(row.get("variables", ""))),
+                                "reply_chain": db.parse_lines(str(row.get("reply_chain", ""))),
+                                "photo_note": str(row.get("photo_note", "")),
+                            }
+                        )
+                st.session_state["selected_posts"] = selected_posts
+                st.session_state["posts_selection_explicit"] = True
+                selected_signature = tuple(sorted(int(post["id"]) for post in selected_posts))
+                previous_signature = st.session_state.get("_selected_posts_signature")
+                if previous_signature is not None and previous_signature != selected_signature:
+                    clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
+                elif save_posts:
+                    clear_preview_draft("Preview brouillon supprimée: posts/photos modifiés. Les posts déjà planifiés restent conservés.")
+                st.session_state["_selected_posts_signature"] = selected_signature
+                st.success(f"{len(selected_posts)} posts sélectionnés et enregistrés pour la prochaine preview.")
+
+            selected_posts = st.session_state.get("selected_posts", [])
             if selected_posts:
                 st.success(f"{len(selected_posts)} posts sélectionnés, dont {sum(1 for p in selected_posts if p.get('media_ids'))} avec photo/media.")
                 if len(selected_posts) < int(current["posts_max"]):
