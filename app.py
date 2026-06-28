@@ -1425,6 +1425,174 @@ st.markdown(
         display: none;
     }
     .warn-copy {color: var(--accent); font-weight: 700;}
+
+    /* shadcn-inspired Streamlit skin */
+    :root {
+        --bg: #09090b;
+        --panel: #0f1117;
+        --panel-strong: #18181b;
+        --line: rgba(255, 255, 255, .10);
+        --line-strong: rgba(255, 255, 255, .18);
+        --text: #fafafa;
+        --muted: #a1a1aa;
+        --faint: #71717a;
+        --accent: #f43f5e;
+        --accent-soft: rgba(244, 63, 94, .12);
+        --success: #22c55e;
+        --success-soft: rgba(34, 197, 94, .10);
+        --warn: #eab308;
+        --warn-soft: rgba(234, 179, 8, .10);
+        --radius: 12px;
+    }
+    .stApp {
+        background:
+            radial-gradient(circle at 12% -8%, rgba(244, 63, 94, .07), transparent 34rem),
+            linear-gradient(180deg, #09090b 0%, #0a0a0d 100%);
+        color: var(--text);
+    }
+    .block-container {
+        max-width: 1380px;
+        padding-top: 1.4rem;
+        padding-bottom: 4rem;
+    }
+    h1, h2, h3, h4 {
+        color: var(--text);
+        font-weight: 760;
+        letter-spacing: -.01em;
+    }
+    [data-testid="stSidebar"] {
+        background: rgba(9, 9, 11, .94);
+        border-right: 1px solid var(--line);
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stSidebar"] label {
+        color: var(--muted);
+    }
+    .app-hero, .section-intro, .step-note, .blocked-panel,
+    .posts-control-panel, .posts-editor-wrap, .selected-panel,
+    .accounts-shell, .accounts-shell-lite, .send-blockers {
+        border-radius: var(--radius);
+        border: 1px solid var(--line);
+        background: rgba(24, 24, 27, .72);
+        box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 18px 60px rgba(0,0,0,.18);
+    }
+    .app-hero {
+        padding: 22px 24px;
+        margin-bottom: 20px;
+    }
+    .section-intro {
+        padding: 18px 20px;
+        background: linear-gradient(180deg, rgba(24,24,27,.86), rgba(15,17,23,.74));
+    }
+    .section-intro span, .app-hero .eyebrow {
+        color: var(--accent);
+        letter-spacing: .11em;
+    }
+    div[data-testid="stButton"] button,
+    div[data-testid="stFormSubmitButton"] button,
+    [data-testid="baseButton-secondary"],
+    [data-testid="baseButton-primary"] {
+        min-height: 42px;
+        border-radius: 10px;
+        border: 1px solid var(--line-strong) !important;
+        background: #18181b !important;
+        color: var(--text) !important;
+        font-weight: 650;
+        box-shadow: 0 1px 0 rgba(255,255,255,.04) inset;
+    }
+    div[data-testid="stButton"] button:hover,
+    div[data-testid="stFormSubmitButton"] button:hover {
+        background: #27272a !important;
+        border-color: rgba(244, 63, 94, .55) !important;
+        transform: translateY(-1px);
+    }
+    div[data-testid="stButton"] button:active,
+    div[data-testid="stFormSubmitButton"] button:active {
+        transform: translateY(0) scale(.99);
+    }
+    div[data-testid="stButton"] button[kind="primary"],
+    div[data-testid="stFormSubmitButton"] button[kind="primary"],
+    [data-testid="baseButton-primary"] {
+        background: var(--accent) !important;
+        border-color: rgba(244, 63, 94, .85) !important;
+        color: #fff !important;
+    }
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stNumberInput"] input,
+    div[data-testid="stDateInput"] input,
+    div[data-testid="stTimeInput"] input,
+    textarea,
+    [data-baseweb="select"] > div {
+        min-height: 44px;
+        border-radius: 10px !important;
+        border: 1px solid var(--line-strong) !important;
+        background: #18181b !important;
+        color: var(--text) !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stTextInput"] input:focus,
+    div[data-testid="stNumberInput"] input:focus,
+    div[data-testid="stDateInput"] input:focus,
+    div[data-testid="stTimeInput"] input:focus,
+    textarea:focus,
+    [data-baseweb="select"] > div:focus-within {
+        border-color: rgba(244, 63, 94, .72) !important;
+        box-shadow: 0 0 0 3px rgba(244, 63, 94, .16) !important;
+    }
+    label, [data-testid="stCaptionContainer"] p {
+        color: var(--muted) !important;
+    }
+    div[data-testid="stMetric"] {
+        border-radius: var(--radius);
+        border: 1px solid var(--line);
+        background: #111113;
+        padding: 16px;
+    }
+    div[data-testid="stMetricValue"] {
+        color: var(--text);
+        font-weight: 720;
+    }
+    .metric-strip, .posts-stats, .account-selection-summary {
+        border-radius: var(--radius);
+        border: 1px solid var(--line);
+        background: var(--line);
+    }
+    .metric-cell, .posts-stats div, .account-selection-summary div {
+        background: #111113;
+    }
+    div[data-testid="stDataFrame"] {
+        border-radius: var(--radius);
+        border: 1px solid var(--line);
+        background: #09090b;
+    }
+    div[data-testid="stDataFrame"] * {
+        font-variant-numeric: tabular-nums;
+    }
+    div[data-testid="stForm"] {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(24,24,27,.52);
+        padding: 18px;
+    }
+    [data-testid="stExpander"] {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(24,24,27,.46);
+        overflow: hidden;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 6px;
+        border-bottom: 1px solid var(--line);
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 10px 10px 0 0;
+        color: var(--muted);
+        padding: 10px 12px;
+    }
+    .stTabs [aria-selected="true"] {
+        color: var(--text) !important;
+        background: #18181b;
+    }
     @media (max-width: 900px) {
         .app-hero, .metric-strip, .flow-rail {
             grid-template-columns: 1fr;
