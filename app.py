@@ -1593,6 +1593,77 @@ st.markdown(
         color: var(--text) !important;
         background: #18181b;
     }
+
+    /* stronger Streamlit/BaseWeb overrides */
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+        background: #09090b !important;
+    }
+    [data-testid="stHeader"] {
+        border-bottom: 1px solid rgba(255,255,255,.08) !important;
+    }
+    [data-testid="stVerticalBlock"] > [style*="flex-direction: column"] {
+        gap: 1.05rem !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"],
+    [data-testid="stForm"],
+    [data-testid="stExpander"],
+    [data-testid="stMetric"],
+    [data-testid="stDataFrameResizable"] {
+        border-radius: 14px !important;
+        border: 1px solid rgba(255,255,255,.10) !important;
+        background: #111113 !important;
+        box-shadow: 0 1px 0 rgba(255,255,255,.04) inset !important;
+    }
+    div[data-testid="stButton"] > button {
+        width: 100%;
+        justify-content: flex-start;
+        text-align: left;
+        white-space: pre-line;
+    }
+    div[data-testid="stButton"] > button p {
+        color: inherit !important;
+        font-weight: 700 !important;
+        line-height: 1.35 !important;
+    }
+    [data-baseweb="input"],
+    [data-baseweb="base-input"],
+    [data-baseweb="textarea"],
+    [data-baseweb="select"] {
+        border-radius: 10px !important;
+        background: #18181b !important;
+        border-color: rgba(255,255,255,.14) !important;
+    }
+    [data-baseweb="input"] input,
+    [data-baseweb="base-input"] input,
+    [data-baseweb="textarea"] textarea {
+        color: #fafafa !important;
+        background: transparent !important;
+    }
+    [data-baseweb="input"]:focus-within,
+    [data-baseweb="base-input"]:focus-within,
+    [data-baseweb="textarea"]:focus-within,
+    [data-baseweb="select"]:focus-within {
+        border-color: rgba(244,63,94,.72) !important;
+        box-shadow: 0 0 0 3px rgba(244,63,94,.16) !important;
+    }
+    [data-testid="stRadio"] label {
+        background: transparent !important;
+    }
+    [data-testid="stRadio"] [role="radiogroup"] {
+        gap: 1rem;
+    }
+    [data-testid="stDataFrame"] {
+        box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 18px 60px rgba(0,0,0,.18) !important;
+    }
+    [data-testid="stFileUploader"] section {
+        border-radius: 14px !important;
+        border: 1px dashed rgba(255,255,255,.18) !important;
+        background: #111113 !important;
+    }
+    [data-testid="stAlert"] {
+        border-radius: 12px !important;
+        border: 1px solid rgba(255,255,255,.10) !important;
+    }
     @media (max-width: 900px) {
         .app-hero, .metric-strip, .flow-rail {
             grid-template-columns: 1fr;
