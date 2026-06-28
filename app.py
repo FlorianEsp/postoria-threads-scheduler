@@ -2524,6 +2524,17 @@ with tabs[5]:
         "Dernier verrou avant action réelle.",
         "L'envoi reste bloqué tant qu'il manque comptes, posts, preview, API ou que dry-run est actif.",
     )
+    send_local_rows = db.list_scheduled()
+    clear_all_col, clear_hint_col = st.columns([1, 2])
+    with clear_all_col:
+        if st.button("Tout enlever de l'envoi", disabled=not send_local_rows, use_container_width=True):
+            deleted = db.clear_all_scheduled_local()
+            st.session_state.pop("preview_rows", None)
+            st.warning(f"{deleted} lignes locales enlevées. Rien supprimé sur Postoria.")
+            st.rerun()
+    with clear_hint_col:
+        st.caption("Visible ici, en haut: vide toute la liste locale Envoi/Preview/Analytics. Ne supprime jamais les posts sur app.postoria.io.")
+
     with st.expander("Workspace Postoria", expanded=not st.session_state.get("workspace_id")):
         workspace_id = render_workspace_picker(client, "send")
     preview = db.list_scheduled("preview")

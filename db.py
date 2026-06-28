@@ -517,6 +517,15 @@ def clear_preview() -> None:
                 conn.execute("DELETE FROM preview_batches WHERE id=?", (batch_id,))
 
 
+def clear_all_scheduled_local() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS count FROM scheduled_posts").fetchone()
+        deleted = int(row["count"] or 0) if row else 0
+        conn.execute("DELETE FROM scheduled_posts")
+        conn.execute("DELETE FROM preview_batches")
+        return deleted
+
+
 def list_preview_batches() -> list[dict[str, Any]]:
     with connect() as conn:
         return [
