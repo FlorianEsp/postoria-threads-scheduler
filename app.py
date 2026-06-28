@@ -528,7 +528,14 @@ def render_flow_status(
     preview_ready: bool,
     analytics_ready: bool,
     send_ready: bool,
-) -> None:
+) -> int:
+    raw_step = st.query_params.get("step", "0") if hasattr(st, "query_params") else "0"
+    if isinstance(raw_step, list):
+        raw_step = raw_step[0] if raw_step else "0"
+    try:
+        active_step = min(5, max(0, int(raw_step)))
+    except (TypeError, ValueError):
+        active_step = 0
     steps = [
         ("1", "Comptes", accounts_ready),
         ("2", "Cadence", cadence_ready),
@@ -538,15 +545,17 @@ def render_flow_status(
         ("6", "Envoi", send_ready),
     ]
     items = []
-    for number, label, ready in steps:
+    for idx, (number, label, ready) in enumerate(steps):
+        state = "is-active" if idx == active_step else ("is-done" if ready else "is-pending")
         items.append(
-            f"<div class='flow-step {'is-done' if ready else 'is-pending'}'>"
+            f"<a class='flow-step {state}' href='?step={idx}'>"
             f"<span>{number}</span>"
             f"<strong>{h(label)}</strong>"
             f"<small>{'OK' if ready else 'À faire'}</small>"
-            "</div>"
+            "</a>"
         )
     st.markdown("<div class='flow-rail'>" + "".join(items) + "</div>", unsafe_allow_html=True)
+    return active_step
 
 
 def render_app_header(api_exists: bool, dry_run: bool, app_tz: str) -> None:
@@ -888,14 +897,6 @@ st.markdown(
     div[data-testid="stButton"] button:active, div[data-testid="stFormSubmitButton"] button:active {
         transform: translateY(1px) scale(.99);
     }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        border-bottom: 1px solid var(--line);
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px 8px 0 0;
-        padding: 12px 14px;
-    }
     .app-hero {
         display: grid;
         grid-template-columns: minmax(0, 1.65fr) minmax(260px, .75fr);
@@ -997,6 +998,7 @@ st.markdown(
         margin: 8px 0 18px;
     }
     .flow-step {
+        display: block;
         position: relative;
         border: 1px solid var(--line);
         border-radius: 8px;
@@ -1004,6 +1006,7 @@ st.markdown(
         min-height: 82px;
         background: var(--panel);
         overflow: hidden;
+        text-decoration: none !important;
         transition: transform .25s cubic-bezier(.16, 1, .3, 1), border-color .25s cubic-bezier(.16, 1, .3, 1);
     }
     .flow-step:hover {transform: translateY(-1px); border-color: var(--line-strong);}
@@ -1030,6 +1033,15 @@ st.markdown(
         color: rgba(211, 250, 229, .95);
         border-color: rgba(47, 191, 123, .45);
         background: rgba(47, 191, 123, .16);
+    }
+    .flow-step.is-active {
+        background: linear-gradient(180deg, rgba(223, 77, 110, .16), rgba(244, 246, 251, .035));
+        border-color: rgba(223, 77, 110, .52);
+    }
+    .flow-step.is-active span {
+        color: rgba(255, 224, 231, .96);
+        border-color: rgba(223, 77, 110, .58);
+        background: rgba(223, 77, 110, .18);
     }
     .step-note {
         border: 1px solid var(--line);
@@ -1505,11 +1517,9 @@ render_metric_strip(
     ]
 )
 
-render_flow_status(accounts_ready, cadence_ready, posts_ready, preview_ready, analytics_ready, send_ready)
+active_step = render_flow_status(accounts_ready, cadence_ready, posts_ready, preview_ready, analytics_ready, send_ready)
 
-tabs = st.tabs(["1. Comptes", "2. Cadence", "3. Posts & Photos", "4. Preview", "5. Analytics", "6. Envoi"])
-
-with tabs[0]:
+if active_step == 0:
     st.subheader("Comptes et groupes")
     section_intro(
         "Étape 1",
@@ -1887,7 +1897,7 @@ with tabs[0]:
             st.warning("Aucun compte sélectionné. Les étapes suivantes restent bloquées.")
         render_group_summary(grouped)
 
-with tabs[1]:
+if active_step == 1:
     st.subheader("Cadence de publication")
     section_intro(
         "Étape 2",
@@ -1965,7 +1975,7 @@ with tabs[1]:
         }
         st.info(distribution_sentence(settings()))
 
-with tabs[2]:
+if active_step == 2:
     st.subheader("Posts & Photos")
     section_intro(
         "Étape 3",
@@ -2253,7 +2263,7 @@ with tabs[2]:
             else:
                 st.warning("Aucun post sélectionné. Preview bloquée.")
 
-with tabs[3]:
+if active_step == 3:
     st.subheader("Preview du planning")
     section_intro(
         "Étape 4",
@@ -2497,7 +2507,7 @@ with tabs[3]:
             ],
         )
 
-with tabs[4]:
+if active_step == 4:
     st.subheader("Analytics de volume")
     section_intro(
         "Étape 5",
@@ -2517,7 +2527,7 @@ with tabs[4]:
         ]
     render_analytics(analytics_rows)
 
-with tabs[5]:
+if active_step == 5:
     st.subheader("Envoi Postoria")
     section_intro(
         "Étape 6",
