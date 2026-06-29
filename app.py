@@ -2289,6 +2289,13 @@ if active_step == 1:
             st.session_state["cadence_same_text_gap"] = int(current.get("same_text_gap", 60))
             st.session_state["cadence_caption_mode"] = current["caption_mode"]
             st.session_state["_cadence_form_signature"] = cadence_signature
+        count_mode = st.radio(
+            "Posts par compte",
+            ["Exact", "Range"],
+            horizontal=True,
+            key="cadence_count_mode",
+            help="Ce choix change l'affichage immédiatement. Clique ensuite sur Appliquer cadence pour l'enregistrer.",
+        )
         with st.form("cadence_settings_form"):
             q1, q2, q3 = st.columns(3)
             with q1:
@@ -2298,7 +2305,7 @@ if active_step == 1:
                 start_time = st.time_input("Début", key="cadence_start_time")
                 end_time = st.time_input("Fin", key="cadence_end_time")
             with q3:
-                count_mode = st.radio("Posts par compte", ["Exact", "Range"], horizontal=True, key="cadence_count_mode")
+                st.markdown(f"**Mode posts : {count_mode}**")
                 rp1, rp2 = st.columns(2)
                 with rp1:
                     posts_min = st.number_input("Exact / Min", min_value=0, max_value=50, step=1, key="cadence_posts_min")
