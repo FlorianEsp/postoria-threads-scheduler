@@ -611,6 +611,22 @@ def short_debug(value, limit: int = 500) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+def refresh_postoria_statuses(client: PostoriaClient, workspace_id: int | str) -> tuple[int, int]:
+    checked = 0
+    errors = 0
+    for row in db.list_scheduled():
+        if not row.get("postoria_post_id"):
+            continue
+        try:
+            res = client.get_post(int(workspace_id), int(row["postoria_post_id"]))
+            db.update_scheduled_result(row["id"], row["postoria_post_id"], postoria_response_status(res), None)
+            checked += 1
+        except Exception as e:
+            db.update_scheduled_result(row["id"], row["postoria_post_id"], "status_error", short_debug(e))
+            errors += 1
+    return checked, errors
+
+
 def h(value) -> str:
     return escape(str(value or ""), quote=True)
 
@@ -695,9 +711,10 @@ def render_flow_status(
     preview_ready: bool,
     analytics_ready: bool,
     send_ready: bool,
+    tracking_ready: bool,
 ) -> int:
     active_step = int(st.session_state.get("active_step", 0))
-    active_step = min(5, max(0, active_step))
+    active_step = min(6, max(0, active_step))
     steps = [
         ("1", "Comptes", accounts_ready),
         ("2", "Cadence", cadence_ready),
@@ -705,8 +722,9 @@ def render_flow_status(
         ("4", "Preview", preview_ready),
         ("5", "Analytics", analytics_ready),
         ("6", "Envoi", send_ready),
+        ("7", "Suivi", tracking_ready),
     ]
-    cols = st.columns([1.15, .85, 1.05, .8, .95, .8])
+    cols = st.columns([1.05, .8, 1.05, .8, .9, .75, .75])
     for idx, (number, label, ready) in enumerate(steps):
         status = "OK" if ready else "À faire"
         active_mark = "● " if idx == active_step else ""
@@ -729,7 +747,7 @@ def render_app_header(api_exists: bool, dry_run: bool, app_tz: str) -> None:
         "<div>"
         "<span class='eyebrow'>Bulk Threads</span>"
         "<h1>Scheduler de publication</h1>"
-        "<p>Un parcours en 5 étapes pour choisir les comptes, calculer la cadence, sélectionner les contenus, vérifier la preview, puis envoyer.</p>"
+        "<p>Un parcours en 7 étapes pour choisir les comptes, calculer la cadence, sélectionner les contenus, vérifier la preview, envoyer, puis suivre les statuts.</p>"
         "</div>"
         "<div class='hero-status'>"
         f"<span class='status-pill {'ok' if api_exists else 'warn'}'>{h(api_state)}</span>"
@@ -2055,6 +2073,7 @@ with st.sidebar:
     st.write("4. Vérifier la preview")
     st.write("5. Lire les analytics")
     st.write("6. Confirmer l'envoi")
+    st.write("7. Suivre les statuts")
     st.divider()
     st.write("Recommencer")
     if st.button("Recommencer planning"):
@@ -2072,6 +2091,7 @@ if api_exists:
 stored_accounts = db.list_accounts()
 posts = db.list_posts(active_only=False)
 preview = db.list_scheduled("preview")
+scheduled_all = db.list_scheduled()
 selected_accounts_count = len(st.session_state.get("selected_accounts", []))
 selected_posts_count = len(st.session_state.get("selected_posts", []))
 current = settings()
@@ -2080,8 +2100,9 @@ accounts_ready = selected_accounts_count > 0
 cadence_ready = accounts_ready and int(current["posts_max"]) <= capacity_now
 posts_ready = selected_posts_count > 0 or int(current["posts_max"]) == 0
 preview_ready = len(preview) > 0
-analytics_ready = len(db.list_scheduled()) > 0
+analytics_ready = len(scheduled_all) > 0
 send_ready = preview_ready and api_exists and not dry_run
+tracking_ready = any(str(row.get("status")) != "preview" or row.get("postoria_post_id") for row in scheduled_all)
 
 render_app_header(api_exists, dry_run, APP_TZ)
 if st.session_state.get("reset_dialog_mode"):
@@ -2097,7 +2118,7 @@ render_metric_strip(
     ]
 )
 
-active_step = render_flow_status(accounts_ready, cadence_ready, posts_ready, preview_ready, analytics_ready, send_ready)
+active_step = render_flow_status(accounts_ready, cadence_ready, posts_ready, preview_ready, analytics_ready, send_ready, tracking_ready)
 
 if active_step == 0:
     st.subheader("Comptes et groupes")
@@ -3283,26 +3304,20 @@ if active_step == 5:
                 progress.progress(index / len(preview), text=f"Envoi Postoria {index}/{len(preview)}")
             progress.empty()
             remaining_preview = len(db.list_scheduled("preview"))
+            if sent_count or failed_count:
+                st.session_state["active_step"] = 6
             if failed_count:
-                st.error(f"Envoi terminé: {sent_count} envoyés, {failed_count} failed, {remaining_preview} encore en preview.")
+                st.error(f"Envoi terminé: {sent_count} envoyés, {failed_count} failed, {remaining_preview} encore en preview. Ouvre l'onglet Suivi pour contrôler.")
                 st.dataframe(pd.DataFrame(error_rows), use_container_width=True, hide_index=True)
             else:
-                st.success(f"Envoi complet: {sent_count} posts programmés sur Postoria, {remaining_preview} post restant en preview.")
+                st.success(f"Envoi complet: {sent_count} posts programmés sur Postoria, {remaining_preview} post restant en preview. Ouvre l'onglet Suivi pour contrôler.")
 
     if st.button("Vérifier statuts Postoria"):
         if not client or not workspace_id:
             st.error("Client Postoria ou workspace manquant.")
         else:
-            checked = 0
-            for row in db.list_scheduled():
-                if row.get("postoria_post_id"):
-                    try:
-                        res = client.get_post(int(workspace_id), int(row["postoria_post_id"]))
-                        db.update_scheduled_result(row["id"], row["postoria_post_id"], postoria_response_status(res), None)
-                        checked += 1
-                    except Exception as e:
-                        db.update_scheduled_result(row["id"], row["postoria_post_id"], "status_error", short_debug(e))
-            st.success(f"Statuts mis à jour pour {checked} posts Postoria.")
+            checked, errors = refresh_postoria_statuses(client, workspace_id)
+            st.success(f"Statuts mis à jour pour {checked} posts Postoria. Erreurs: {errors}.")
 
     st.caption("Aucune suppression Postoria n'est disponible dans cette app. Les posts envoyés restent conservés côté Postoria.")
 
@@ -3314,3 +3329,91 @@ if active_step == 5:
             hide_index=True,
             column_config={"threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir")},
         )
+
+if active_step == 6:
+    st.subheader("Suivi après envoi")
+    section_intro(
+        "Étape 7",
+        "Vérifie ce que Postoria a accepté, ce qui a échoué, et ce qui doit être contrôlé sur Threads.",
+        "Cet onglet ne programme rien. Il lit les statuts enregistrés localement et peut rafraîchir les posts déjà créés sur Postoria.",
+    )
+    with st.expander("Workspace Postoria", expanded=not st.session_state.get("workspace_id")):
+        follow_workspace_id = render_workspace_picker(client, "follow")
+
+    follow_rows = attach_threads_urls(db.list_scheduled())
+    if not follow_rows:
+        render_locked_step(
+            "Aucun post à suivre.",
+            ["Génère une preview, puis envoie les posts à Postoria pour créer un historique de suivi."],
+        )
+    else:
+        refresh_col, note_col = st.columns([1, 2])
+        with refresh_col:
+            if st.button("Rafraîchir statuts Postoria", disabled=not client or not follow_workspace_id, use_container_width=True):
+                checked, errors = refresh_postoria_statuses(client, follow_workspace_id)
+                st.success(f"{checked} statuts mis à jour. Erreurs: {errors}.")
+                st.rerun()
+        with note_col:
+            st.caption("Le refresh interroge seulement les posts qui ont déjà un ID Postoria. Les previews locales ne sont pas envoyées.")
+
+        follow_rows = attach_threads_urls(db.list_scheduled())
+        render_status_counts(follow_rows)
+        render_account_delivery_panel(follow_rows, "follow_account_control", "Vue par compte")
+
+        follow_df = scheduled_dataframe(follow_rows)
+        if follow_df.empty:
+            st.info("Aucune ligne lisible pour le suivi.")
+        else:
+            f1, f2, f3 = st.columns([1, 1, 1])
+            with f1:
+                follow_status = st.radio(
+                    "Statut",
+                    ["Tous", "Acceptés Postoria", "Failed", "À vérifier", "Preview locale"],
+                    horizontal=False,
+                    key="follow_status_filter",
+                )
+            with f2:
+                follow_group = choose_option(
+                    "Groupe",
+                    ["Tous les groupes"] + sorted(follow_df["group_name"].fillna("Sans groupe").astype(str).unique().tolist()),
+                    key="follow_group_filter",
+                )
+            with f3:
+                follow_account = choose_option(
+                    "Compte",
+                    ["Tous les comptes"] + sorted(follow_df["account_name"].fillna("Compte inconnu").astype(str).unique().tolist()),
+                    key="follow_account_filter",
+                )
+
+            visible = follow_df.copy()
+            if follow_status == "Acceptés Postoria":
+                visible = visible[
+                    ~visible["status"].astype(str).isin(["preview", "preview_saved"])
+                    & ~visible["status"].astype(str).str.contains("fail|error", case=False, regex=True)
+                ]
+            elif follow_status == "Failed":
+                visible = visible[visible["status"].astype(str).str.contains("fail|error", case=False, regex=True)]
+            elif follow_status == "À vérifier":
+                visible = visible[
+                    visible["time_state"].astype(str).str.contains("passé|vérifier", case=False, regex=True)
+                    & ~visible["status"].astype(str).eq("preview")
+                ]
+            elif follow_status == "Preview locale":
+                visible = visible[visible["status"].astype(str).isin(["preview", "preview_saved"])]
+            if follow_group != "Tous les groupes":
+                visible = visible[visible["group_name"].fillna("Sans groupe").astype(str) == follow_group]
+            if follow_account != "Tous les comptes":
+                visible = visible[visible["account_name"].fillna("Compte inconnu").astype(str) == follow_account]
+
+            visible = visible.sort_values(["scheduled_time_local", "account_name"])
+            st.caption(f"{len(visible)} posts dans cette vue.")
+            st.dataframe(
+                visible[[
+                    "day", "time", "time_state", "account_name", "threads_url",
+                    "group_name", "status", "photos", "replies", "text", "error",
+                ]],
+                use_container_width=True,
+                hide_index=True,
+                height=680,
+                column_config={"threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir")},
+            )
