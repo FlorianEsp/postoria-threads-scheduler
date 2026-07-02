@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import hashlib
 import io
-from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from html import escape
 from math import floor
@@ -184,6 +183,43 @@ def scheduled_dataframe(rows: list[dict]) -> pd.DataFrame:
     return df
 
 
+def account_delivery_dataframe(rows: list[dict]) -> pd.DataFrame:
+    df = scheduled_dataframe(rows)
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "account_name", "threads_url", "group_name", "total", "preview",
+                "scheduled", "failed", "past", "next_post", "first_post", "last_post",
+            ]
+        )
+    work = df.copy()
+    work["is_preview"] = work["status"].astype(str).eq("preview")
+    work["is_scheduled"] = ~work["status"].astype(str).isin(["preview", "preview_saved"]) & ~work["status"].astype(str).str.contains("fail|error", case=False, regex=True)
+    work["is_failed"] = work["status"].astype(str).str.contains("fail|error", case=False, regex=True)
+    work["is_past"] = work["time_state"].astype(str).str.contains("passé|vérifier", case=False, regex=True)
+    summary = (
+        work.groupby(["account_name", "threads_url", "group_name"], dropna=False)
+        .agg(
+            total=("id", "count"),
+            preview=("is_preview", "sum"),
+            scheduled=("is_scheduled", "sum"),
+            failed=("is_failed", "sum"),
+            past=("is_past", "sum"),
+            next_post=("scheduled_time_local", "min"),
+            first_post=("scheduled_time_local", "min"),
+            last_post=("scheduled_time_local", "max"),
+        )
+        .reset_index()
+        .sort_values(["failed", "preview", "next_post", "account_name"], ascending=[False, False, True, True])
+    )
+    for column in ["preview", "scheduled", "failed", "past", "total"]:
+        summary[column] = summary[column].astype(int)
+    summary["next_post"] = summary["next_post"].astype(str).str.slice(0, 19)
+    summary["first_post"] = summary["first_post"].astype(str).str.slice(0, 19)
+    summary["last_post"] = summary["last_post"].astype(str).str.slice(0, 19)
+    return summary
+
+
 def analytics_dataframe(rows: list[dict]) -> pd.DataFrame:
     df = scheduled_dataframe(rows)
     if df.empty:
@@ -262,6 +298,73 @@ def render_status_counts(rows: list[dict]) -> None:
     cols = st.columns(4)
     for col, status in zip(cols, ["preview", "scheduled", "published", "failed"]):
         col.metric(status.title(), counts.get(status, 0))
+
+
+def render_account_delivery_panel(rows: list[dict], key_prefix: str, title: str = "Contrôle par compte") -> None:
+    account_df = account_delivery_dataframe(rows)
+    if account_df.empty:
+        return
+    st.markdown(f"#### {title}")
+    total_posts = int(account_df["total"].sum())
+    failed_accounts = int((account_df["failed"] > 0).sum())
+    preview_accounts = int((account_df["preview"] > 0).sum())
+    late_accounts = int((account_df["past"] > 0).sum())
+    render_metric_strip(
+        [
+            ("Comptes", str(len(account_df)), "avec lignes visibles"),
+            ("Posts", str(total_posts), "dans cette vue"),
+            ("À envoyer", str(int(account_df["preview"].sum())), f"{preview_accounts} comptes"),
+            ("Failed/passés", f"{failed_accounts}/{late_accounts}", "à contrôler"),
+        ]
+    )
+    st.dataframe(
+        account_df[
+            [
+                "account_name", "threads_url", "group_name", "total", "preview",
+                "scheduled", "failed", "past", "next_post", "first_post", "last_post",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+        height=min(520, 96 + len(account_df) * 42),
+        column_config={
+            "account_name": st.column_config.TextColumn("Compte", width="medium"),
+            "threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir"),
+            "group_name": st.column_config.TextColumn("Groupe", width="small"),
+            "total": st.column_config.NumberColumn("Total", width="small"),
+            "preview": st.column_config.NumberColumn("À envoyer", width="small"),
+            "scheduled": st.column_config.NumberColumn("Envoyés/planifiés", width="small"),
+            "failed": st.column_config.NumberColumn("Failed", width="small"),
+            "past": st.column_config.NumberColumn("Passés", width="small"),
+            "next_post": st.column_config.TextColumn("Prochain post", width="medium"),
+            "first_post": st.column_config.TextColumn("Début", width="medium"),
+            "last_post": st.column_config.TextColumn("Fin", width="medium"),
+        },
+    )
+    st.session_state.setdefault(f"{key_prefix}_links_per_account", 5)
+    link_limit = st.number_input(
+        "Posts visibles par compte",
+        min_value=1,
+        max_value=50,
+        step=1,
+        key=f"{key_prefix}_links_per_account",
+        help="Change seulement l'affichage des lignes par compte. L'envoi Postoria tente quand même toute la preview.",
+    )
+    df = scheduled_dataframe(rows)
+    if df.empty:
+        return
+    df = df.sort_values(["account_name", "scheduled_time_local"])
+    with st.expander("Détail horaire par compte", expanded=False):
+        for account_name, chunk in df.groupby("account_name", sort=True):
+            shown = chunk.head(int(link_limit))
+            suffix = "" if len(chunk) <= int(link_limit) else f" · {len(chunk) - int(link_limit)} masqués"
+            st.markdown(f"**{account_name} · {len(chunk)} posts{suffix}**")
+            st.dataframe(
+                shown[["day", "time", "time_state", "threads_url", "group_name", "status", "text", "error"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={"threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir")},
+            )
 
 
 def is_failed_status(row: dict) -> bool:
@@ -1783,7 +1886,130 @@ st.markdown(
         border-radius: 12px !important;
         border: 1px solid rgba(255,255,255,.10) !important;
     }
+
+    /* final airy layout pass */
+    .block-container {
+        max-width: 1440px !important;
+        padding: 2rem 2.4rem 5rem !important;
+    }
+    .main .block-container > div {
+        padding-left: .1rem;
+        padding-right: .1rem;
+    }
+    h1 {margin: .2rem 0 1.1rem !important;}
+    h2, h3 {margin: 1.25rem 0 .85rem !important;}
+    h4 {margin: 1rem 0 .65rem !important;}
+    .app-hero {
+        text-align: left !important;
+        padding: 28px 30px !important;
+        margin: 6px 0 28px !important;
+    }
+    .section-intro {
+        text-align: left !important;
+        padding: 24px 28px !important;
+        margin: 18px 0 26px !important;
+    }
+    .section-intro strong {
+        line-height: 1.3 !important;
+    }
+    .metric-strip,
+    .posts-stats,
+    .account-selection-summary {
+        margin: 18px 0 24px !important;
+        gap: 1px !important;
+    }
+    .metric-cell,
+    .posts-stats div,
+    .account-selection-summary div {
+        padding: 18px 20px !important;
+        text-align: left !important;
+    }
+    .metric-cell span,
+    .metric-cell small,
+    .metric-cell strong,
+    .posts-stats span,
+    .posts-stats b,
+    .account-selection-summary span,
+    .account-selection-summary strong {
+        text-align: left !important;
+    }
+    div[data-testid="stForm"] {
+        padding: 26px !important;
+        margin: 16px 0 26px !important;
+    }
+    [data-testid="stExpander"] {
+        margin: 14px 0 20px !important;
+    }
+    [data-testid="stHorizontalBlock"] {
+        gap: 1.4rem !important;
+        align-items: flex-start !important;
+    }
+    div[data-testid="stVerticalBlock"] {
+        gap: 1.15rem !important;
+    }
+    label {
+        display: block !important;
+        margin-bottom: .35rem !important;
+        line-height: 1.35 !important;
+    }
+    div[data-testid="stTextInput"],
+    div[data-testid="stNumberInput"],
+    div[data-testid="stDateInput"],
+    div[data-testid="stTimeInput"],
+    div[data-testid="stSelectbox"],
+    div[data-testid="stRadio"] {
+        margin-bottom: .8rem !important;
+    }
+    div[data-testid="stButton"] > button,
+    div[data-testid="stFormSubmitButton"] > button {
+        min-height: 48px !important;
+        padding: 12px 18px !important;
+    }
+    div[data-testid="stButton"] > button p,
+    div[data-testid="stFormSubmitButton"] > button p {
+        line-height: 1.25 !important;
+    }
+    div[data-testid="stDataFrame"],
+    div[data-testid="stDataFrameResizable"] {
+        margin: 18px auto 28px auto !important;
+    }
+    div[data-testid="stDataFrame"] [role="columnheader"] {
+        min-height: 42px !important;
+    }
+    div[data-testid="stDataFrame"] [role="gridcell"] {
+        min-height: 40px !important;
+        padding-top: 8px !important;
+        padding-bottom: 8px !important;
+    }
+    .accounts-shell,
+    .accounts-shell-lite,
+    .posts-editor-wrap,
+    .selected-panel,
+    .blocked-panel,
+    .send-blockers {
+        margin-top: 18px !important;
+        margin-bottom: 24px !important;
+    }
+    .posts-control-panel {
+        padding: 20px 22px !important;
+        margin: 22px 0 20px !important;
+    }
+    .group-strip {
+        padding: 10px 0 24px !important;
+        gap: 16px !important;
+    }
+    [data-testid="stCaptionContainer"] p {
+        margin-top: .35rem !important;
+        margin-bottom: .75rem !important;
+    }
     @media (max-width: 900px) {
+        .block-container {
+            padding: 1.3rem 1rem 4rem !important;
+        }
+        .app-hero,
+        .section-intro {
+            padding: 20px !important;
+        }
         .app-hero, .metric-strip, .flow-rail {
             grid-template-columns: 1fr;
         }
@@ -2735,6 +2961,7 @@ if active_step == 3:
     if all_scheduled:
         st.markdown("### Preview, planifiés & failed")
         render_status_counts(all_scheduled)
+        render_account_delivery_panel(all_scheduled, "preview_account_control")
         batches = db.list_preview_batches()
         if batches:
             with st.expander("Lots de preview", expanded=False):
@@ -2969,6 +3196,8 @@ if active_step == 5:
             f"{len(preview_past)} posts de la preview ont déjà une heure passée. "
             "Regénère la preview avec une date/heure future avant envoi."
         )
+    if preview:
+        render_account_delivery_panel(attach_threads_urls(preview), "send_account_control", "Contrôle avant envoi")
     clear_col, keep_col = st.columns([1, 2])
     with clear_col:
         if st.button("Tout enlever de la preview", disabled=not preview, use_container_width=True):
@@ -3012,27 +3241,13 @@ if active_step == 5:
         if not client or not workspace_id:
             st.error("Client Postoria ou workspace manquant.")
         else:
-            failures = defaultdict(int)
             sent_count = 0
             failed_count = 0
-            skipped_count = 0
             error_rows = []
             now_utc = datetime.now(ZoneInfo("UTC"))
             progress = st.progress(0, text="Envoi Postoria en cours...")
             for index, row in enumerate(preview, start=1):
                 account_id = int(row["account_id"])
-                if failures[account_id] >= 2:
-                    skipped_count += 1
-                    error = "Compte ignoré après 2 échecs dans ce lot"
-                    db.update_scheduled_result(row["id"], None, "skipped", error)
-                    error_rows.append({
-                        "id": row["id"],
-                        "compte": row["account_name"],
-                        "heure": row["scheduled_time_local"],
-                        "erreur": error,
-                    })
-                    progress.progress(index / len(preview), text=f"Envoi Postoria {index}/{len(preview)}")
-                    continue
                 try:
                     scheduled_utc = parse_utc_scheduled(row.get("scheduled_time_utc"))
                     if scheduled_utc is None:
@@ -3054,10 +3269,8 @@ if active_step == 5:
                     if postoria_id is None:
                         raise RuntimeError(f"Réponse Postoria sans post id: {short_debug(res)}")
                     db.update_scheduled_result(row["id"], postoria_id, postoria_status, None)
-                    failures[account_id] = 0
                     sent_count += 1
                 except Exception as e:
-                    failures[account_id] += 1
                     failed_count += 1
                     error = short_debug(e)
                     db.update_scheduled_result(row["id"], None, "failed", error)
@@ -3069,11 +3282,12 @@ if active_step == 5:
                     })
                 progress.progress(index / len(preview), text=f"Envoi Postoria {index}/{len(preview)}")
             progress.empty()
-            if failed_count or skipped_count:
-                st.error(f"Envoi terminé: {sent_count} envoyés, {failed_count} failed, {skipped_count} ignorés.")
+            remaining_preview = len(db.list_scheduled("preview"))
+            if failed_count:
+                st.error(f"Envoi terminé: {sent_count} envoyés, {failed_count} failed, {remaining_preview} encore en preview.")
                 st.dataframe(pd.DataFrame(error_rows), use_container_width=True, hide_index=True)
             else:
-                st.success(f"Envoi terminé: {sent_count} posts programmés sur Postoria.")
+                st.success(f"Envoi complet: {sent_count} posts programmés sur Postoria, {remaining_preview} post restant en preview.")
 
     if st.button("Vérifier statuts Postoria"):
         if not client or not workspace_id:
