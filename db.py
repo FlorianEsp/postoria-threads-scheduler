@@ -133,6 +133,7 @@ def init_db() -> None:
                 avatar_url TEXT,
                 group_name TEXT DEFAULT 'tous',
                 active_for_day INTEGER DEFAULT 1,
+                selected_for_schedule INTEGER DEFAULT 1,
                 consecutive_failures INTEGER DEFAULT 0
             );
 
@@ -196,6 +197,7 @@ def init_db() -> None:
         _ensure_column(conn, "accounts", "username", "TEXT")
         _ensure_column(conn, "accounts", "avatar_url", "TEXT")
         _ensure_column(conn, "accounts", "group_name", "TEXT DEFAULT 'tous'")
+        _ensure_column(conn, "accounts", "selected_for_schedule", "INTEGER DEFAULT 1")
         _ensure_column(conn, "account_groups", "color", "TEXT DEFAULT '#8b5cf6'")
         _ensure_column(conn, "scheduled_posts", "media_ids", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "content_type", "TEXT DEFAULT 'text'")
@@ -339,7 +341,7 @@ def upsert_accounts(accounts: list[dict[str, Any]]) -> None:
             )
 
 
-def update_account_preferences(account_id: int, group_name: str, active_for_day: bool) -> None:
+def update_account_preferences(account_id: int, group_name: str, active_for_day: bool, selected_for_schedule: bool) -> None:
     clean_group = str(group_name or "tous").strip()
     with connect() as conn:
         conn.execute(
@@ -347,8 +349,17 @@ def update_account_preferences(account_id: int, group_name: str, active_for_day:
             (clean_group,),
         )
         conn.execute(
-            "UPDATE accounts SET group_name=?, active_for_day=? WHERE id=?",
-            (clean_group, int(bool(active_for_day)), int(account_id)),
+            "UPDATE accounts SET group_name=?, active_for_day=?, selected_for_schedule=? WHERE id=?",
+            (clean_group, int(bool(active_for_day)), int(bool(selected_for_schedule)), int(account_id)),
+        )
+
+
+def update_scheduled_media(local_id: int, media_ids: Any) -> None:
+    parsed = parse_media_ids(media_ids)
+    with connect() as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET media_ids=?, content_type=? WHERE id=? AND status='preview'",
+            (serialize_media_ids(parsed), "image" if parsed else "text", int(local_id)),
         )
 
 

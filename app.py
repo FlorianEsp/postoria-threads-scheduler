@@ -146,12 +146,61 @@ def build_grouped_accounts(accounts: list[dict], edited: pd.DataFrame) -> dict[s
         if row is None:
             continue
         group_name = str(row["group"] or "tous").strip()
-        db.update_account_preferences(int(account["id"]), group_name, bool(row["active"]))
+        db.update_account_preferences(int(account["id"]), group_name, bool(row["active"]), bool(row["use"]))
         if not bool(row["use"]) or not bool(row["active"]):
             continue
         grouped.setdefault(group_name, {"accounts": []})
         grouped[group_name]["accounts"].append({**account, "group_name": group_name})
     return grouped
+
+
+def restore_account_selection_from_db(accounts: list[dict]) -> None:
+    if st.session_state.get("_accounts_restored_from_db"):
+        return
+    rows = []
+    selected_groups: set[str] = set()
+    account_states: list[tuple[int, str, bool, bool]] = []
+    for account in accounts:
+        account_id = int(account["id"])
+        group_name = account.get("group_name") or "tous"
+        active = bool(account.get("active_for_day", 1))
+        selected = bool(account.get("selected_for_schedule", active))
+        account_states.append((account_id, group_name, active, selected))
+        st.session_state.setdefault(f"account_group_{account_id}", group_name)
+        st.session_state.setdefault(f"account_active_{account_id}", active)
+        st.session_state.setdefault(f"account_use_{account_id}", active and selected)
+        if active and selected:
+            selected_groups.add(group_name)
+        rows.append(
+            {
+                "use": active and selected,
+                "id": account_id,
+                "compte": account_label(account),
+                "group": group_name,
+                "active": active,
+                "url": account.get("url", ""),
+            }
+        )
+    if selected_groups and not st.session_state.get("selected_group_filters"):
+        st.session_state["selected_group_filters"] = sorted(selected_groups)
+    if selected_groups:
+        manual_excluded = [
+            account_id
+            for account_id, group_name, active, selected in account_states
+            if active and group_name in selected_groups and not selected
+        ]
+        manual_included = [
+            account_id
+            for account_id, group_name, active, selected in account_states
+            if active and selected and group_name not in selected_groups
+        ]
+        st.session_state.setdefault("manual_excluded_accounts", sorted(manual_excluded))
+        st.session_state.setdefault("manual_included_accounts", sorted(manual_included))
+    if rows and not st.session_state.get("grouped_accounts"):
+        grouped = build_grouped_accounts(accounts, pd.DataFrame(rows))
+        st.session_state["grouped_accounts"] = grouped
+        st.session_state["selected_accounts"] = [account for group in grouped.values() for account in group["accounts"]]
+    st.session_state["_accounts_restored_from_db"] = True
 
 
 def preview_dataframe(rows: list[dict]) -> pd.DataFrame:
@@ -365,6 +414,91 @@ def render_account_delivery_panel(rows: list[dict], key_prefix: str, title: str 
                 hide_index=True,
                 column_config={"threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir")},
             )
+
+
+def preview_card_html(row: dict) -> str:
+    local_time = str(row.get("scheduled_time_local") or "")
+    day = local_time[:10] or "-"
+    hour = local_time[11:16] or "-"
+    caption = str(row.get("caption") or "")
+    media_count = len(row.get("media_ids") or [])
+    status = str(row.get("status") or "preview")
+    status_class = "is-failed" if any(token in status.lower() for token in ("fail", "error")) else "is-ready"
+    group_name = str(row.get("group_name") or "Sans groupe")
+    media_label = f"{media_count} media" if media_count else "Texte seul"
+    text = h(caption[:210] + ("..." if len(caption) > 210 else ""))
+    return (
+        f"<article class='preview-card {status_class}'>"
+        "<div class='preview-card-top'>"
+        f"<span class='preview-time'>{h(hour)}</span>"
+        f"<span class='preview-status'>{h(status)}</span>"
+        "</div>"
+        f"<div class='preview-day'>{h(day)}</div>"
+        f"<strong>{h(row.get('account_name') or 'Compte')}</strong>"
+        f"<small>{h(group_name)} · {h(media_label)}</small>"
+        f"<p>{text}</p>"
+        "</article>"
+    )
+
+
+def render_visual_preview(rows: list[dict], key_prefix: str) -> None:
+    if not rows:
+        return
+    st.markdown("#### Aperçu visuel")
+    mode = st.radio(
+        "Organisation visuelle",
+        ["Par compte", "Par heure", "Par groupe"],
+        horizontal=True,
+        key=f"{key_prefix}_visual_mode",
+    )
+    st.session_state.setdefault(f"{key_prefix}_visual_limit", 36)
+    limit = st.number_input(
+        "Cartes visibles",
+        min_value=6,
+        max_value=120,
+        step=6,
+        key=f"{key_prefix}_visual_limit",
+    )
+    sorted_rows = sorted(rows, key=lambda row: (str(row.get("scheduled_time_utc")), str(row.get("account_name"))))
+    if mode == "Par compte":
+        sorted_rows = sorted(rows, key=lambda row: (str(row.get("account_name")), str(row.get("scheduled_time_utc"))))
+    elif mode == "Par groupe":
+        sorted_rows = sorted(rows, key=lambda row: (str(row.get("group_name")), str(row.get("account_name")), str(row.get("scheduled_time_utc"))))
+    cards = "".join(preview_card_html(row) for row in sorted_rows[: int(limit)])
+    st.markdown(f"<div class='preview-card-grid'>{cards}</div>", unsafe_allow_html=True)
+    if len(sorted_rows) > int(limit):
+        st.caption(f"{len(sorted_rows) - int(limit)} posts masqués. Augmente Cartes visibles pour en voir plus.")
+
+
+def render_preview_media_tools(preview_rows: list[dict]) -> None:
+    rows = [row for row in preview_rows if str(row.get("status")) == "preview"]
+    if not rows:
+        return
+    with st.expander("Ajouter une photo à une ligne preview", expanded=False):
+        st.caption("Ajoute un ou plusieurs media IDs Postoria sur une ligne précise. Cela modifie seulement la preview locale active.")
+        options = [int(row["id"]) for row in rows]
+        picked_id = choose_option(
+            "Post preview",
+            options,
+            format_func=lambda row_id: next(
+                f"{str(row.get('scheduled_time_local'))[:16]} · {row.get('account_name')} · {str(row.get('caption'))[:70]}"
+                for row in rows
+                if int(row["id"]) == int(row_id)
+            ),
+            key="preview_media_target",
+        )
+        picked_row = next((row for row in rows if int(row["id"]) == int(picked_id)), None)
+        default_media = media_ids_text(picked_row.get("media_ids")) if picked_row else ""
+        st.session_state.setdefault(f"preview_media_ids_{picked_id}", default_media)
+        media_ids = st.text_input(
+            "Media IDs",
+            placeholder="12345, 67890",
+            key=f"preview_media_ids_{picked_id}",
+        )
+        if st.button("Ajouter / remplacer la photo", disabled=not picked_id, use_container_width=True):
+            db.update_scheduled_media(int(picked_id), media_ids)
+            st.success("Media IDs ajoutés à la preview. Rien envoyé à Postoria pour l'instant.")
+            st.rerun()
 
 
 def is_failed_status(row: dict) -> bool:
@@ -929,6 +1063,14 @@ def reset_workflow_state(clear_accounts: bool = True, clear_posts: bool = True, 
         st.session_state["grouped_accounts"] = {}
         st.session_state["selected_group_filters"] = []
         st.session_state.pop("_account_group_signature", None)
+        st.session_state.pop("_accounts_restored_from_db", None)
+        for account in db.list_accounts():
+            db.update_account_preferences(
+                int(account["id"]),
+                account.get("group_name") or "tous",
+                bool(account.get("active_for_day", 1)),
+                False,
+            )
         for key in list(st.session_state.keys()):
             if key.startswith("account_use_"):
                 st.session_state[key] = False
@@ -2020,6 +2162,88 @@ st.markdown(
         margin-top: .35rem !important;
         margin-bottom: .75rem !important;
     }
+    .preview-card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
+        gap: 16px;
+        margin: 18px 0 28px;
+    }
+    .preview-card {
+        border: 1px solid rgba(255,255,255,.11);
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(24,24,27,.88), rgba(15,17,23,.68));
+        box-shadow: 0 1px 0 rgba(255,255,255,.05) inset, 0 18px 48px rgba(0,0,0,.18);
+        padding: 18px;
+        min-height: 228px;
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+        transition: transform .22s cubic-bezier(.16,1,.3,1), border-color .22s cubic-bezier(.16,1,.3,1);
+    }
+    .preview-card:hover {
+        transform: translateY(-1px);
+        border-color: rgba(244, 63, 94, .38);
+    }
+    .preview-card-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: flex-start;
+    }
+    .preview-time {
+        color: #fafafa;
+        font-size: 2.2rem;
+        font-weight: 780;
+        line-height: .9;
+        font-variant-numeric: tabular-nums;
+    }
+    .preview-status {
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 999px;
+        color: var(--muted);
+        background: rgba(255,255,255,.04);
+        padding: 5px 9px;
+        font-size: .72rem;
+        font-weight: 760;
+        white-space: nowrap;
+    }
+    .preview-card.is-ready .preview-status {
+        color: rgba(220, 252, 231, .9);
+        border-color: rgba(34, 197, 94, .32);
+        background: rgba(34, 197, 94, .10);
+    }
+    .preview-card.is-failed .preview-status {
+        color: rgba(255, 218, 225, .95);
+        border-color: rgba(244, 63, 94, .38);
+        background: rgba(244, 63, 94, .12);
+    }
+    .preview-day {
+        color: var(--faint);
+        font-size: .78rem;
+        font-weight: 720;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+    }
+    .preview-card strong {
+        display: block;
+        color: var(--text);
+        font-size: 1.02rem;
+        line-height: 1.25;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .preview-card small {
+        color: var(--muted);
+        font-size: .82rem;
+        line-height: 1.4;
+    }
+    .preview-card p {
+        color: rgba(244,244,245,.88);
+        line-height: 1.5;
+        margin: 6px 0 0;
+        font-size: .92rem;
+    }
     @media (max-width: 900px) {
         .block-container {
             padding: 1.3rem 1rem 4rem !important;
@@ -2047,6 +2271,9 @@ st.markdown(
         }
         .posts-stats {
             grid-template-columns: 1fr 1fr;
+        }
+        .preview-card-grid {
+            grid-template-columns: 1fr;
         }
         .mobile-account-card {
             display: block;
@@ -2089,6 +2316,7 @@ if api_exists:
         st.error(str(e))
 
 stored_accounts = db.list_accounts()
+restore_account_selection_from_db(stored_accounts)
 posts = db.list_posts(active_only=False)
 preview = db.list_scheduled("preview")
 scheduled_all = db.list_scheduled()
@@ -2982,6 +3210,8 @@ if active_step == 3:
     if all_scheduled:
         st.markdown("### Preview, planifiés & failed")
         render_status_counts(all_scheduled)
+        render_visual_preview(all_scheduled, "preview")
+        render_preview_media_tools(db.list_scheduled("preview"))
         render_account_delivery_panel(all_scheduled, "preview_account_control")
         batches = db.list_preview_batches()
         if batches:
