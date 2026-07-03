@@ -761,6 +761,54 @@ def refresh_postoria_statuses(client: PostoriaClient, workspace_id: int | str) -
     return checked, errors
 
 
+def retryable_failed_posts(rows: list[dict]) -> list[dict]:
+    return [
+        row for row in rows
+        if is_failed_status(row) and not row.get("postoria_post_id")
+    ]
+
+
+def retry_failed_posts_direct(
+    client: PostoriaClient,
+    workspace_id: int | str,
+    rows: list[dict],
+) -> tuple[int, int, list[dict]]:
+    sent_count = 0
+    failed_count = 0
+    errors: list[dict] = []
+    for row in rows:
+        try:
+            if not parse_utc_scheduled(row.get("scheduled_time_utc")):
+                raise RuntimeError(f"Heure UTC invalide: {row.get('scheduled_time_utc')}")
+            res = client.create_post(
+                int(workspace_id),
+                int(row["account_id"]),
+                row["caption"],
+                row["scheduled_time_utc"],
+                row.get("media_ids") or [],
+            )
+            postoria_id = postoria_response_id(res)
+            postoria_status = postoria_response_status(res)
+            if postoria_id is None:
+                raise RuntimeError(f"Réponse Postoria sans post id: {short_debug(res)}")
+            db.update_scheduled_result(row["id"], postoria_id, postoria_status, None)
+            sent_count += 1
+        except Exception as e:
+            failed_count += 1
+            error = short_debug(e)
+            db.update_scheduled_result(row["id"], None, "failed", error)
+            errors.append(
+                {
+                    "id": row.get("id"),
+                    "compte": row.get("account_name"),
+                    "heure_initiale": row.get("scheduled_time_local"),
+                    "utc_initial": row.get("scheduled_time_utc"),
+                    "erreur": error,
+                }
+            )
+    return sent_count, failed_count, errors
+
+
 def h(value) -> str:
     return escape(str(value or ""), quote=True)
 
@@ -3585,6 +3633,42 @@ if active_step == 6:
                 st.rerun()
         with note_col:
             st.caption("Le refresh interroge seulement les posts qui ont déjà un ID Postoria. Les previews locales ne sont pas envoyées.")
+
+        follow_rows = attach_threads_urls(db.list_scheduled())
+        retry_candidates = retryable_failed_posts(follow_rows)
+        retry_a, retry_b = st.columns([1, 2])
+        with retry_a:
+            retry_disabled = not retry_candidates or not client or not follow_workspace_id or dry_run
+            if st.button(
+                f"Retenter failed sans ID ({len(retry_candidates)})",
+                disabled=retry_disabled,
+                type="primary",
+                use_container_width=True,
+            ):
+                progress = st.progress(0, text="Retry failed Postoria en cours...")
+                sent_count = 0
+                failed_count = 0
+                error_rows: list[dict] = []
+                for index, row in enumerate(retry_candidates, start=1):
+                    sent, failed, errors = retry_failed_posts_direct(client, follow_workspace_id, [row])
+                    sent_count += sent
+                    failed_count += failed
+                    error_rows.extend(errors)
+                    progress.progress(index / len(retry_candidates), text=f"Retry failed {index}/{len(retry_candidates)}")
+                progress.empty()
+                if failed_count:
+                    st.error(f"Retry terminé: {sent_count} acceptés Postoria, {failed_count} encore failed.")
+                    st.dataframe(pd.DataFrame(error_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.success(f"Retry terminé: {sent_count} failed relancés et acceptés par Postoria.")
+        with retry_b:
+            if dry_run:
+                st.warning("Retry bloqué: dry-run actif.")
+            else:
+                st.caption(
+                    "Le retry reprend uniquement les failed sans postoria_post_id. "
+                    "Même compte, même texte, mêmes médias, même scheduled_time. Les posts déjà acceptés ne sont jamais renvoyés."
+                )
 
         follow_rows = attach_threads_urls(db.list_scheduled())
         render_status_counts(follow_rows)
