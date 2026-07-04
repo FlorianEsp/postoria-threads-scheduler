@@ -3004,13 +3004,6 @@ if active_step == 1:
             key="cadence_count_mode",
             help="Ce choix change l'affichage immédiatement. Clique ensuite sur Appliquer cadence pour l'enregistrer.",
         )
-        if count_mode == "Range":
-            range_min, range_max = st.session_state.get(
-                "cadence_posts_range",
-                (int(current["posts_min"]), max(int(current["posts_max"]), int(current["posts_min"]))),
-            )
-            if int(range_max) <= int(range_min) and int(range_min) < 50:
-                st.session_state["cadence_posts_range"] = (int(range_min), int(range_min) + 1)
         with st.form("cadence_settings_form"):
             q1, q2, q3 = st.columns(3)
             with q1:
@@ -3099,8 +3092,6 @@ if active_step == 1:
             }
             st.session_state["cadence_posts_min"] = int(posts_min)
             st.session_state["cadence_posts_max"] = int(posts_max)
-            st.session_state["cadence_posts_exact"] = int(posts_min)
-            st.session_state["cadence_posts_range"] = (int(posts_min), int(posts_max))
             st.session_state["_cadence_form_signature"] = (
                 publish_date,
                 start_time,
