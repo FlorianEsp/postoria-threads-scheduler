@@ -95,10 +95,37 @@ def parse_json_list(value: Any) -> list[str]:
     return parse_lines(text)
 
 
+def parse_int_ids(value: Any) -> list[int]:
+    ids: list[int] = []
+    for item in parse_json_list(value):
+        try:
+            ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def serialize_int_ids(value: Any) -> str:
+    import json
+
+    if isinstance(value, list):
+        data = value
+    else:
+        data = parse_json_list(value)
+    ids: list[int] = []
+    for item in data:
+        try:
+            ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return json.dumps(ids, ensure_ascii=False)
+
+
 def _hydrate_media(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
     data["media_ids"] = parse_media_ids(data.get("media_ids"))
     data["media_count"] = len(data["media_ids"])
+    data["local_photo_asset_ids"] = parse_int_ids(data.get("local_photo_asset_ids"))
     data["variables"] = parse_json_map(data.get("variables_json"))
     data["reply_chain"] = parse_json_list(data.get("reply_chain"))
     data["chain_replies"] = parse_json_list(data.get("chain_replies"))
@@ -159,6 +186,24 @@ def init_db() -> None:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS photo_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS photo_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                media_id TEXT DEFAULT '',
+                mime_type TEXT DEFAULT 'image/jpeg',
+                image_bytes BLOB,
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS scheduled_posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 library_post_id INTEGER NOT NULL,
@@ -170,6 +215,7 @@ def init_db() -> None:
                 scheduled_time_local TEXT NOT NULL,
                 scheduled_time_utc TEXT NOT NULL,
                 media_ids TEXT DEFAULT '',
+                local_photo_asset_ids TEXT DEFAULT '',
                 content_type TEXT DEFAULT 'text',
                 variables_json TEXT DEFAULT '',
                 chain_replies TEXT DEFAULT '',
@@ -200,6 +246,7 @@ def init_db() -> None:
         _ensure_column(conn, "accounts", "selected_for_schedule", "INTEGER DEFAULT 1")
         _ensure_column(conn, "account_groups", "color", "TEXT DEFAULT '#8b5cf6'")
         _ensure_column(conn, "scheduled_posts", "media_ids", "TEXT DEFAULT ''")
+        _ensure_column(conn, "scheduled_posts", "local_photo_asset_ids", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "content_type", "TEXT DEFAULT 'text'")
         _ensure_column(conn, "scheduled_posts", "variables_json", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "chain_replies", "TEXT DEFAULT ''")
@@ -354,18 +401,108 @@ def update_account_preferences(account_id: int, group_name: str, active_for_day:
         )
 
 
-def update_scheduled_media(local_id: int, media_ids: Any) -> None:
+def update_scheduled_media(local_id: int, media_ids: Any, local_photo_asset_ids: Any = None) -> None:
     parsed = parse_media_ids(media_ids)
     with connect() as conn:
+        if local_photo_asset_ids is None:
+            row = conn.execute(
+                "SELECT local_photo_asset_ids FROM scheduled_posts WHERE id=? AND status='preview'",
+                (int(local_id),),
+            ).fetchone()
+            local_photo_asset_ids = row["local_photo_asset_ids"] if row else []
+        local_ids = serialize_int_ids(local_photo_asset_ids)
+        content_type = "image" if parsed or parse_int_ids(local_ids) else "text"
         conn.execute(
-            "UPDATE scheduled_posts SET media_ids=?, content_type=? WHERE id=? AND status='preview'",
-            (serialize_media_ids(parsed), "image" if parsed else "text", int(local_id)),
+            "UPDATE scheduled_posts SET media_ids=?, local_photo_asset_ids=?, content_type=? WHERE id=? AND status='preview'",
+            (serialize_media_ids(parsed), local_ids, content_type, int(local_id)),
         )
 
 
 def list_accounts() -> list[dict[str, Any]]:
     with connect() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM accounts ORDER BY name COLLATE NOCASE").fetchall()]
+
+
+def upsert_photo_group(name: str, note: str = "") -> int:
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        raise ValueError("Nom de groupe photo manquant.")
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO photo_groups (name, note) VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET note=excluded.note
+            """,
+            (clean_name, str(note or "").strip()),
+        )
+        row = conn.execute("SELECT id FROM photo_groups WHERE name=?", (clean_name,)).fetchone()
+        return int(row["id"])
+
+
+def add_photo_asset(group_name: str, name: str, media_id: str, mime_type: str, image_bytes: bytes, note: str = "") -> int:
+    group_id = upsert_photo_group(group_name)
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO photo_assets (group_id, name, media_id, mime_type, image_bytes, note)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                group_id,
+                str(name or "photo").strip(),
+                str(media_id or "").strip(),
+                str(mime_type or "image/jpeg").strip(),
+                image_bytes,
+                str(note or "").strip(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def list_photo_groups() -> list[dict[str, Any]]:
+    with connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT g.*, COUNT(a.id) AS photo_count,
+                       SUM(CASE WHEN COALESCE(a.media_id, '') != '' THEN 1 ELSE 0 END) AS postoria_ready_count
+                FROM photo_groups g
+                LEFT JOIN photo_assets a ON a.group_id = g.id
+                GROUP BY g.id
+                ORDER BY g.name COLLATE NOCASE
+                """
+            ).fetchall()
+        ]
+
+
+def list_photo_assets(group_name: str | None = None) -> list[dict[str, Any]]:
+    query = """
+        SELECT a.*, g.name AS group_name
+        FROM photo_assets a
+        JOIN photo_groups g ON g.id = a.group_id
+    """
+    params: tuple[Any, ...] = ()
+    if group_name:
+        query += " WHERE g.name = ?"
+        params = (str(group_name),)
+    query += " ORDER BY g.name COLLATE NOCASE, a.id DESC"
+    with connect() as conn:
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+
+def get_photo_asset(asset_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT a.*, g.name AS group_name
+            FROM photo_assets a
+            JOIN photo_groups g ON g.id = a.group_id
+            WHERE a.id = ?
+            """,
+            (int(asset_id),),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def list_groups() -> list[dict[str, Any]]:
@@ -486,13 +623,13 @@ def save_preview(rows: list[dict[str, Any]], name: str | None = None) -> str:
                 """
                 INSERT INTO scheduled_posts
                 (library_post_id, caption_hash, caption, account_id, account_name, group_name,
-                 scheduled_time_local, scheduled_time_utc, media_ids, content_type, variables_json, chain_replies, status, preview_batch_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'preview', ?)
+                 scheduled_time_local, scheduled_time_utc, media_ids, local_photo_asset_ids, content_type, variables_json, chain_replies, status, preview_batch_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'preview', ?)
                 """,
                 (
                     r["library_post_id"], r["caption_hash"], r["caption"], r["account_id"],
                     r["account_name"], r.get("group_name"), r["scheduled_time_local"], r["scheduled_time_utc"],
-                    serialize_media_ids(r.get("media_ids", [])), r.get("content_type", "text"),
+                    serialize_media_ids(r.get("media_ids", [])), serialize_int_ids(r.get("local_photo_asset_ids", [])), r.get("content_type", "text"),
                     serialize_json_map(r.get("variables", {})), serialize_lines(r.get("chain_replies", [])),
                     batch_id,
                 ),

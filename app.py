@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import base64
 import hashlib
 import io
+import random
 from datetime import date, datetime, time, timedelta
 from html import escape
 from math import floor
@@ -416,19 +418,50 @@ def render_account_delivery_panel(rows: list[dict], key_prefix: str, title: str 
             )
 
 
-def preview_card_html(row: dict) -> str:
+def photo_data_uri(asset: dict | None) -> str:
+    if not asset or not asset.get("image_bytes"):
+        return ""
+    mime_type = str(asset.get("mime_type") or "image/jpeg")
+    encoded = base64.b64encode(asset["image_bytes"]).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def preview_asset_for_row(row: dict, assets_by_id: dict[int, dict], assets_by_media_id: dict[str, dict]) -> dict | None:
+    for asset_id in row.get("local_photo_asset_ids") or []:
+        asset = assets_by_id.get(int(asset_id))
+        if asset:
+            return asset
+    for media_id in row.get("media_ids") or []:
+        asset = assets_by_media_id.get(str(media_id))
+        if asset:
+            return asset
+    return None
+
+
+def preview_card_html(row: dict, assets_by_id: dict[int, dict] | None = None, assets_by_media_id: dict[str, dict] | None = None) -> str:
+    assets_by_id = assets_by_id or {}
+    assets_by_media_id = assets_by_media_id or {}
     local_time = str(row.get("scheduled_time_local") or "")
     day = local_time[:10] or "-"
     hour = local_time[11:16] or "-"
     caption = str(row.get("caption") or "")
     media_count = len(row.get("media_ids") or [])
+    local_count = len(row.get("local_photo_asset_ids") or [])
     status = str(row.get("status") or "preview")
     status_class = "is-failed" if any(token in status.lower() for token in ("fail", "error")) else "is-ready"
     group_name = str(row.get("group_name") or "Sans groupe")
-    media_label = f"{media_count} media" if media_count else "Texte seul"
+    media_label = f"{media_count} media ID" if media_count else ("Photo locale" if local_count else "Texte seul")
     text = h(caption[:210] + ("..." if len(caption) > 210 else ""))
+    asset = preview_asset_for_row(row, assets_by_id, assets_by_media_id)
+    image_src = photo_data_uri(asset)
+    image_html = (
+        f"<div class='preview-thumb'><img src='{image_src}' alt=''></div>"
+        if image_src
+        else "<div class='preview-thumb is-empty'><span>Image</span></div>"
+    )
     return (
         f"<article class='preview-card {status_class}'>"
+        f"{image_html}"
         "<div class='preview-card-top'>"
         f"<span class='preview-time'>{h(hour)}</span>"
         f"<span class='preview-status'>{h(status)}</span>"
@@ -464,7 +497,14 @@ def render_visual_preview(rows: list[dict], key_prefix: str) -> None:
         sorted_rows = sorted(rows, key=lambda row: (str(row.get("account_name")), str(row.get("scheduled_time_utc"))))
     elif mode == "Par groupe":
         sorted_rows = sorted(rows, key=lambda row: (str(row.get("group_name")), str(row.get("account_name")), str(row.get("scheduled_time_utc"))))
-    cards = "".join(preview_card_html(row) for row in sorted_rows[: int(limit)])
+    photo_assets = db.list_photo_assets()
+    assets_by_id = {int(asset["id"]): asset for asset in photo_assets}
+    assets_by_media_id = {
+        str(asset.get("media_id")): asset
+        for asset in photo_assets
+        if str(asset.get("media_id") or "").strip()
+    }
+    cards = "".join(preview_card_html(row, assets_by_id, assets_by_media_id) for row in sorted_rows[: int(limit)])
     st.markdown(f"<div class='preview-card-grid'>{cards}</div>", unsafe_allow_html=True)
     if len(sorted_rows) > int(limit):
         st.caption(f"{len(sorted_rows) - int(limit)} posts masqués. Augmente Cartes visibles pour en voir plus.")
@@ -474,8 +514,8 @@ def render_preview_media_tools(preview_rows: list[dict]) -> None:
     rows = [row for row in preview_rows if str(row.get("status")) == "preview"]
     if not rows:
         return
-    with st.expander("Ajouter une photo à une ligne preview", expanded=False):
-        st.caption("Ajoute un ou plusieurs media IDs Postoria sur une ligne précise. Cela modifie seulement la preview locale active.")
+    with st.expander("Photos sur une ligne preview", expanded=False):
+        st.caption("Choisis un post précis. Le + ajoute une photo, le - retire les photos de cette ligne. Rien n'est envoyé à Postoria avant l'étape Envoi.")
         options = [int(row["id"]) for row in rows]
         picked_id = choose_option(
             "Post preview",
@@ -488,17 +528,84 @@ def render_preview_media_tools(preview_rows: list[dict]) -> None:
             key="preview_media_target",
         )
         picked_row = next((row for row in rows if int(row["id"]) == int(picked_id)), None)
-        default_media = media_ids_text(picked_row.get("media_ids")) if picked_row else ""
-        st.session_state.setdefault(f"preview_media_ids_{picked_id}", default_media)
-        media_ids = st.text_input(
-            "Media IDs",
-            placeholder="12345, 67890",
-            key=f"preview_media_ids_{picked_id}",
-        )
-        if st.button("Ajouter / remplacer la photo", disabled=not picked_id, use_container_width=True):
-            db.update_scheduled_media(int(picked_id), media_ids)
-            st.success("Media IDs ajoutés à la preview. Rien envoyé à Postoria pour l'instant.")
-            st.rerun()
+        current_media = list(picked_row.get("media_ids") or []) if picked_row else []
+        current_local = list(picked_row.get("local_photo_asset_ids") or []) if picked_row else []
+        st.caption(f"Actuel: {len(current_media)} media IDs Postoria, {len(current_local)} photos locales.")
+        remove_col, add_col = st.columns([1, 2])
+        with remove_col:
+            if st.button("- Retirer photos", disabled=not picked_row or (not current_media and not current_local), use_container_width=True):
+                db.update_scheduled_media(int(picked_id), [], [])
+                st.warning("Photos retirées de cette ligne preview. Rien supprimé dans les groupes photos.")
+                st.rerun()
+        with add_col:
+            add_mode = st.radio(
+                "+ Ajouter",
+                ["Photo précise", "Random groupe", "Media ID manuel"],
+                horizontal=True,
+                key="preview_add_photo_mode",
+            )
+            photo_assets = db.list_photo_assets()
+            photo_groups = db.list_photo_groups()
+            selected_asset = None
+            manual_media_ids = ""
+            if add_mode == "Photo précise":
+                ready_assets = photo_assets
+                if ready_assets:
+                    asset_id = choose_option(
+                        "Choisir photo",
+                        [int(asset["id"]) for asset in ready_assets],
+                        format_func=lambda aid: next(
+                            f"{asset['group_name']} / {asset['name']} / media:{asset.get('media_id') or 'manquant'}"
+                            for asset in ready_assets
+                            if int(asset["id"]) == int(aid)
+                        ),
+                        key="preview_precise_photo_asset",
+                    )
+                    selected_asset = next((asset for asset in ready_assets if int(asset["id"]) == int(asset_id)), None)
+                else:
+                    st.info("Aucune photo locale. Ajoute des photos dans 3. Posts/photos.")
+            elif add_mode == "Random groupe":
+                group_names = [group["name"] for group in photo_groups if int(group.get("photo_count") or 0) > 0]
+                if group_names:
+                    group_name = choose_option("Groupe photo", group_names, key="preview_random_photo_group")
+                    candidates = db.list_photo_assets(str(group_name))
+                    if candidates:
+                        selected_asset = random.choice(candidates)
+                        st.caption(f"Random prêt: {selected_asset['name']} / media:{selected_asset.get('media_id') or 'manquant'}")
+                else:
+                    st.info("Aucun groupe photo avec image.")
+            else:
+                manual_media_ids = st.text_input("Media IDs à ajouter", placeholder="12345, 67890", key="preview_manual_media_ids")
+
+            if st.button("+ Ajouter photo", disabled=not picked_row, use_container_width=True):
+                new_media = list(current_media)
+                new_local = list(current_local)
+                if add_mode in ("Photo précise", "Random groupe"):
+                    if not selected_asset:
+                        st.error("Choisis une photo avant d'ajouter.")
+                    else:
+                        asset_id = int(selected_asset["id"])
+                        if asset_id not in new_local:
+                            new_local.append(asset_id)
+                        media_id = str(selected_asset.get("media_id") or "").strip()
+                        if media_id and media_id not in new_media:
+                            new_media.append(media_id)
+                        if not media_id:
+                            st.warning("Photo ajoutée en aperçu local, mais sans media ID Postoria elle ne partira pas à l'envoi.")
+                        db.update_scheduled_media(int(picked_id), new_media, new_local)
+                        st.success("Photo ajoutée à cette ligne preview.")
+                        st.rerun()
+                else:
+                    added_media = db.parse_media_ids(manual_media_ids)
+                    if not added_media:
+                        st.error("Ajoute au moins un media ID.")
+                    else:
+                        for media_id in added_media:
+                            if media_id not in new_media:
+                                new_media.append(media_id)
+                        db.update_scheduled_media(int(picked_id), new_media, new_local)
+                        st.success("Media ID ajouté à cette ligne preview.")
+                        st.rerun()
 
 
 def is_failed_status(row: dict) -> bool:
@@ -765,6 +872,13 @@ def retryable_failed_posts(rows: list[dict]) -> list[dict]:
     return [
         row for row in rows
         if is_failed_status(row) and not row.get("postoria_post_id")
+    ]
+
+
+def local_photo_without_media_id(rows: list[dict]) -> list[dict]:
+    return [
+        row for row in rows
+        if row.get("local_photo_asset_ids") and not row.get("media_ids")
     ]
 
 
@@ -2228,6 +2342,30 @@ st.markdown(
         gap: 9px;
         transition: transform .22s cubic-bezier(.16,1,.3,1), border-color .22s cubic-bezier(.16,1,.3,1);
     }
+    .preview-thumb {
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid rgba(255,255,255,.10);
+        background: rgba(255,255,255,.04);
+        display: grid;
+        place-items: center;
+        margin-bottom: 4px;
+    }
+    .preview-thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
+    .preview-thumb.is-empty span {
+        color: var(--faint);
+        font-size: .78rem;
+        font-weight: 760;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
     .preview-card:hover {
         transform: translateY(-1px);
         border-color: rgba(244, 63, 94, .38);
@@ -2291,6 +2429,43 @@ st.markdown(
         line-height: 1.5;
         margin: 6px 0 0;
         font-size: .92rem;
+    }
+    .photo-asset-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 14px;
+        margin: 16px 0 28px;
+    }
+    .photo-asset-card {
+        border: 1px solid rgba(255,255,255,.10);
+        border-radius: 14px;
+        background: rgba(24,24,27,.58);
+        padding: 10px;
+        min-width: 0;
+    }
+    .photo-asset-card img {
+        width: 100%;
+        aspect-ratio: 1 / 1;
+        object-fit: cover;
+        border-radius: 10px;
+        display: block;
+        margin-bottom: 9px;
+    }
+    .photo-asset-card strong,
+    .photo-asset-card small {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .photo-asset-card strong {
+        color: var(--text);
+        font-size: .9rem;
+    }
+    .photo-asset-card small {
+        color: var(--muted);
+        font-size: .78rem;
+        margin-top: 2px;
     }
     @media (max-width: 900px) {
         .block-container {
@@ -2967,6 +3142,81 @@ if active_step == 2:
             )
         folder_options = [""] + [f["name"] for f in folders]
 
+        st.markdown("#### Groupes photos")
+        st.caption("Ces groupes servent à voir les images localement et à choisir les media IDs Postoria depuis la Preview.")
+        photo_groups = db.list_photo_groups()
+        photo_col1, photo_col2 = st.columns([1, 2])
+        with photo_col1:
+            photo_group_name = st.text_input("Nom groupe photo", placeholder="ex: selfie, tenue, miroir")
+            photo_group_note = st.text_input("Note groupe photo", placeholder="optionnel")
+            if st.button("Créer groupe photo", disabled=not photo_group_name.strip(), use_container_width=True):
+                db.upsert_photo_group(photo_group_name, photo_group_note)
+                st.success("Groupe photo créé.")
+                st.rerun()
+        with photo_col2:
+            group_names_for_upload = [group["name"] for group in photo_groups]
+            upload_group = choose_option("Groupe cible", group_names_for_upload, key="photo_upload_group") if group_names_for_upload else None
+            photo_uploads = st.file_uploader(
+                "Ajouter images locales",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=True,
+                help="L'image sert à la prévisualisation locale. Le media ID sert à l'envoi Postoria.",
+            )
+            upload_media_ids = st.text_area(
+                "Media IDs Postoria associés",
+                height=70,
+                placeholder="Un media ID par image, dans le même ordre. Peut être vide si tu veux seulement prévisualiser.",
+            )
+            if st.button("Sauver images dans le groupe", disabled=not upload_group or not photo_uploads, use_container_width=True):
+                media_lines = [line.strip() for line in upload_media_ids.replace(",", "\n").splitlines()]
+                saved = 0
+                for idx, uploaded_photo in enumerate(photo_uploads or []):
+                    media_id = media_lines[idx] if idx < len(media_lines) else ""
+                    db.add_photo_asset(
+                        str(upload_group),
+                        uploaded_photo.name,
+                        media_id,
+                        uploaded_photo.type or "image/jpeg",
+                        uploaded_photo.getvalue(),
+                        "",
+                    )
+                    saved += 1
+                st.success(f"{saved} images ajoutées au groupe {upload_group}.")
+                st.rerun()
+
+        photo_groups = db.list_photo_groups()
+        if photo_groups:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "groupe": group["name"],
+                            "photos": int(group.get("photo_count") or 0),
+                            "avec_media_id": int(group.get("postoria_ready_count") or 0),
+                            "note": group.get("note", ""),
+                        }
+                        for group in photo_groups
+                    ]
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+        photo_assets = db.list_photo_assets()
+        if photo_assets:
+            preview_assets = photo_assets[:12]
+            cards = []
+            for asset in preview_assets:
+                src = photo_data_uri(asset)
+                media_id = str(asset.get("media_id") or "media ID manquant")
+                cards.append(
+                    "<div class='photo-asset-card'>"
+                    f"<img src='{src}' alt=''>"
+                    f"<strong>{h(asset.get('name'))}</strong>"
+                    f"<small>{h(asset.get('group_name'))} · {h(media_id)}</small>"
+                    "</div>"
+                )
+            st.markdown("<div class='photo-asset-grid'>" + "".join(cards) + "</div>", unsafe_allow_html=True)
+
         st.markdown("#### Posts")
         import_col, manual_col = st.columns(2)
         with import_col:
@@ -3489,11 +3739,17 @@ if active_step == 5:
     total_photos = sum(len(row.get("media_ids") or []) for row in preview)
     total_replies = sum(len(row.get("chain_replies") or []) for row in preview)
     preview_past = [row for row in preview if is_past_scheduled(row)]
+    local_photo_missing_media = local_photo_without_media_id(preview)
     st.write(f"{len(preview)} posts en preview, {total_photos} media IDs attachés.")
     if preview_past:
         st.error(
             f"{len(preview_past)} posts de la preview ont déjà une heure passée. "
             "Regénère la preview avec une date/heure future avant envoi."
+        )
+    if local_photo_missing_media:
+        st.error(
+            f"{len(local_photo_missing_media)} posts ont une photo locale sans media ID Postoria. "
+            "Ajoute le media ID ou retire la photo avant l'envoi."
         )
     if preview:
         render_account_delivery_panel(attach_threads_urls(preview), "send_account_control", "Contrôle avant envoi")
@@ -3523,6 +3779,8 @@ if active_step == 5:
         send_blockers.append("pas de preview")
     if preview_past:
         send_blockers.append(f"{len(preview_past)} horaires déjà passés")
+    if local_photo_missing_media:
+        send_blockers.append(f"{len(local_photo_missing_media)} photos locales sans media ID Postoria")
     if not api_exists or not client:
         send_blockers.append("API manquante")
     if dry_run:
