@@ -2982,11 +2982,21 @@ if active_step == 1:
             st.session_state["cadence_count_mode"] = current["count_mode"]
             st.session_state["cadence_posts_min"] = int(current["posts_min"])
             st.session_state["cadence_posts_max"] = int(current["posts_max"])
+            st.session_state["cadence_posts_exact"] = int(current["posts_min"])
+            st.session_state["cadence_posts_range"] = (
+                int(current["posts_min"]),
+                max(int(current["posts_max"]), int(current["posts_min"])),
+            )
             st.session_state["cadence_min_interval"] = int(current["min_interval"])
             st.session_state["cadence_avoid_same_text"] = bool(current.get("avoid_same_text", False))
             st.session_state["cadence_same_text_gap"] = int(current.get("same_text_gap", 60))
             st.session_state["cadence_caption_mode"] = current["caption_mode"]
             st.session_state["_cadence_form_signature"] = cadence_signature
+        st.session_state.setdefault("cadence_posts_exact", int(current["posts_min"]))
+        st.session_state.setdefault(
+            "cadence_posts_range",
+            (int(current["posts_min"]), max(int(current["posts_max"]), int(current["posts_min"]))),
+        )
         count_mode = st.radio(
             "Posts par compte",
             ["Exact", "Range"],
@@ -2994,6 +3004,13 @@ if active_step == 1:
             key="cadence_count_mode",
             help="Ce choix change l'affichage immédiatement. Clique ensuite sur Appliquer cadence pour l'enregistrer.",
         )
+        if count_mode == "Range":
+            range_min, range_max = st.session_state.get(
+                "cadence_posts_range",
+                (int(current["posts_min"]), max(int(current["posts_max"]), int(current["posts_min"]))),
+            )
+            if int(range_max) <= int(range_min) and int(range_min) < 50:
+                st.session_state["cadence_posts_range"] = (int(range_min), int(range_min) + 1)
         with st.form("cadence_settings_form"):
             q1, q2, q3 = st.columns(3)
             with q1:
@@ -3004,16 +3021,27 @@ if active_step == 1:
                 end_time = st.time_input("Fin", key="cadence_end_time")
             with q3:
                 st.markdown(f"**Mode posts : {count_mode}**")
-                rp1, rp2 = st.columns(2)
-                with rp1:
-                    posts_min = st.number_input("Exact / Min", min_value=0, max_value=50, step=1, key="cadence_posts_min")
-                with rp2:
-                    posts_max_input = st.number_input("Max", min_value=0, max_value=50, step=1, key="cadence_posts_max")
-                posts_max = int(posts_min) if count_mode == "Exact" else max(int(posts_max_input), int(posts_min))
                 if count_mode == "Exact":
-                    st.caption("Mode Exact: seul le champ Exact / Min est utilisé.")
-                elif int(posts_max_input) < int(posts_min):
-                    st.warning("Max corrigé automatiquement au niveau du Min.")
+                    posts_min = st.number_input(
+                        "Nombre exact",
+                        min_value=0,
+                        max_value=50,
+                        step=1,
+                        key="cadence_posts_exact",
+                    )
+                    posts_max = int(posts_min)
+                    st.caption("Chaque compte recevra exactement ce nombre de posts.")
+                else:
+                    posts_range = st.slider(
+                        "Range posts par compte",
+                        min_value=0,
+                        max_value=50,
+                        value=st.session_state.get("cadence_posts_range", (int(current["posts_min"]), int(current["posts_max"]))),
+                        step=1,
+                        key="cadence_posts_range",
+                    )
+                    posts_min, posts_max = int(posts_range[0]), int(posts_range[1])
+                    st.caption(f"Chaque compte recevra un nombre random entre {posts_min} et {posts_max} posts.")
 
             q4, q5 = st.columns([1, 1])
             with q4:
@@ -3069,6 +3097,10 @@ if active_step == 1:
                 "same_text_gap": int(same_text_gap),
                 "caption_mode": caption_mode,
             }
+            st.session_state["cadence_posts_min"] = int(posts_min)
+            st.session_state["cadence_posts_max"] = int(posts_max)
+            st.session_state["cadence_posts_exact"] = int(posts_min)
+            st.session_state["cadence_posts_range"] = (int(posts_min), int(posts_max))
             st.session_state["_cadence_form_signature"] = (
                 publish_date,
                 start_time,
