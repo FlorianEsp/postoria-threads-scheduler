@@ -3142,80 +3142,123 @@ if active_step == 2:
             )
         folder_options = [""] + [f["name"] for f in folders]
 
-        st.markdown("#### Groupes photos")
-        st.caption("Ces groupes servent à voir les images localement et à choisir les media IDs Postoria depuis la Preview.")
-        photo_groups = db.list_photo_groups()
-        photo_col1, photo_col2 = st.columns([1, 2])
-        with photo_col1:
-            photo_group_name = st.text_input("Nom groupe photo", placeholder="ex: selfie, tenue, miroir")
-            photo_group_note = st.text_input("Note groupe photo", placeholder="optionnel")
-            if st.button("Créer groupe photo", disabled=not photo_group_name.strip(), use_container_width=True):
-                db.upsert_photo_group(photo_group_name, photo_group_note)
-                st.success("Groupe photo créé.")
-                st.rerun()
-        with photo_col2:
-            group_names_for_upload = [group["name"] for group in photo_groups]
-            upload_group = choose_option("Groupe cible", group_names_for_upload, key="photo_upload_group") if group_names_for_upload else None
+        st.markdown("#### Photos locales")
+        st.caption("Ajoute les images d'abord. Ensuite ouvre la galerie, sélectionne une photo, puis range-la dans un groupe ou ajoute son media ID Postoria.")
+        upload_col, gallery_col = st.columns([1.35, 1])
+        with upload_col:
             photo_uploads = st.file_uploader(
-                "Ajouter images locales",
+                "Ajouter photos",
                 type=["png", "jpg", "jpeg", "webp"],
                 accept_multiple_files=True,
-                help="L'image sert à la prévisualisation locale. Le media ID sert à l'envoi Postoria.",
+                help="Import local uniquement. Tu pourras choisir le groupe après dans la galerie.",
             )
-            upload_media_ids = st.text_area(
-                "Media IDs Postoria associés",
-                height=70,
-                placeholder="Un media ID par image, dans le même ordre. Peut être vide si tu veux seulement prévisualiser.",
-            )
-            if st.button("Sauver images dans le groupe", disabled=not upload_group or not photo_uploads, use_container_width=True):
-                media_lines = [line.strip() for line in upload_media_ids.replace(",", "\n").splitlines()]
+            if st.button("Ajouter les photos", disabled=not photo_uploads, use_container_width=True):
                 saved = 0
-                for idx, uploaded_photo in enumerate(photo_uploads or []):
-                    media_id = media_lines[idx] if idx < len(media_lines) else ""
+                for uploaded_photo in photo_uploads or []:
                     db.add_photo_asset(
-                        str(upload_group),
+                        "",
                         uploaded_photo.name,
-                        media_id,
+                        "",
                         uploaded_photo.type or "image/jpeg",
                         uploaded_photo.getvalue(),
                         "",
                     )
                     saved += 1
-                st.success(f"{saved} images ajoutées au groupe {upload_group}.")
+                st.success(f"{saved} photos ajoutées. Ouvre la galerie pour les ranger.")
+                st.session_state["show_photo_gallery"] = True
+                st.rerun()
+        with gallery_col:
+            photo_groups = db.list_photo_groups()
+            photo_assets = db.list_photo_assets()
+            st.metric("Photos", len(photo_assets))
+            st.metric("Groupes", len([group for group in photo_groups if group["name"] != db.DEFAULT_PHOTO_GROUP]))
+            toggle_label = "Fermer galerie" if st.session_state.get("show_photo_gallery") else "Ouvrir galerie"
+            if st.button(toggle_label, disabled=not photo_assets, use_container_width=True):
+                st.session_state["show_photo_gallery"] = not st.session_state.get("show_photo_gallery", False)
                 st.rerun()
 
         photo_groups = db.list_photo_groups()
-        if photo_groups:
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "groupe": group["name"],
-                            "photos": int(group.get("photo_count") or 0),
-                            "avec_media_id": int(group.get("postoria_ready_count") or 0),
-                            "note": group.get("note", ""),
-                        }
-                        for group in photo_groups
-                    ]
-                ),
-                hide_index=True,
-                use_container_width=True,
-            )
         photo_assets = db.list_photo_assets()
-        if photo_assets:
-            preview_assets = photo_assets[:12]
-            cards = []
-            for asset in preview_assets:
-                src = photo_data_uri(asset)
-                media_id = str(asset.get("media_id") or "media ID manquant")
-                cards.append(
-                    "<div class='photo-asset-card'>"
-                    f"<img src='{src}' alt=''>"
-                    f"<strong>{h(asset.get('name'))}</strong>"
-                    f"<small>{h(asset.get('group_name'))} · {h(media_id)}</small>"
-                    "</div>"
+        if photo_groups:
+            visible_groups = [group for group in photo_groups if group["name"] != db.DEFAULT_PHOTO_GROUP]
+            if visible_groups:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "groupe": group["name"],
+                                "photos": int(group.get("photo_count") or 0),
+                                "avec_media_id": int(group.get("postoria_ready_count") or 0),
+                                "note": group.get("note", ""),
+                            }
+                            for group in visible_groups
+                        ]
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
                 )
-            st.markdown("<div class='photo-asset-grid'>" + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+        if photo_assets and st.session_state.get("show_photo_gallery"):
+            gallery_filter_options = ["Toutes"] + [group["name"] for group in photo_groups]
+            gallery_filter = choose_option("Voir", gallery_filter_options, key="photo_gallery_filter")
+            gallery_assets = photo_assets if gallery_filter == "Toutes" else db.list_photo_assets(str(gallery_filter))
+            st.markdown("##### Galerie")
+            asset_cols = st.columns(4)
+            for idx, asset in enumerate(gallery_assets[:24]):
+                with asset_cols[idx % 4]:
+                    st.image(asset["image_bytes"], use_container_width=True)
+                    media_badge = asset.get("media_id") or "media ID manquant"
+                    st.caption(f"{asset['group_name']} · {media_badge}")
+                    if st.button("Choisir", key=f"choose_photo_asset_{asset['id']}", use_container_width=True):
+                        st.session_state["selected_photo_asset_id"] = int(asset["id"])
+                        st.rerun()
+            if len(gallery_assets) > 24:
+                st.caption(f"{len(gallery_assets) - 24} photos masquées. Filtre par groupe pour réduire la galerie.")
+
+        selected_photo_id = st.session_state.get("selected_photo_asset_id")
+        selected_photo = db.get_photo_asset(int(selected_photo_id)) if selected_photo_id else None
+        if selected_photo:
+            st.markdown("##### Photo sélectionnée")
+            detail_col1, detail_col2 = st.columns([1, 1.4])
+            with detail_col1:
+                st.image(selected_photo["image_bytes"], use_container_width=True)
+                st.caption(f"{selected_photo['name']} · groupe actuel: {selected_photo['group_name']}")
+            with detail_col2:
+                existing_group_names = [group["name"] for group in db.list_photo_groups() if group["name"] != db.DEFAULT_PHOTO_GROUP]
+                new_group_name = st.text_input("Créer nouveau groupe", placeholder="ex: tenue rouge, selfie miroir")
+                group_options = existing_group_names + ([new_group_name.strip()] if new_group_name.strip() and new_group_name.strip() not in existing_group_names else [])
+                target_group = choose_option(
+                    "Mettre dans le groupe",
+                    group_options or [db.DEFAULT_PHOTO_GROUP],
+                    key=f"selected_photo_group_{selected_photo['id']}",
+                )
+                selected_media_id = st.text_input(
+                    "Media ID Postoria",
+                    value=str(selected_photo.get("media_id") or ""),
+                    placeholder="optionnel, nécessaire pour l'envoi avec image",
+                    key=f"selected_photo_media_{selected_photo['id']}",
+                )
+                selected_note = st.text_input(
+                    "Note",
+                    value=str(selected_photo.get("note") or ""),
+                    placeholder="optionnel",
+                    key=f"selected_photo_note_{selected_photo['id']}",
+                )
+                save_detail_col, close_detail_col = st.columns(2)
+                with save_detail_col:
+                    if st.button("Enregistrer photo", use_container_width=True):
+                        db.update_photo_asset(
+                            int(selected_photo["id"]),
+                            str(target_group),
+                            selected_media_id,
+                            selected_note,
+                        )
+                        st.success("Photo mise à jour.")
+                        st.rerun()
+                with close_detail_col:
+                    if st.button("Désélectionner", use_container_width=True):
+                        st.session_state.pop("selected_photo_asset_id", None)
+                        st.rerun()
 
         st.markdown("#### Posts")
         import_col, manual_col = st.columns(2)

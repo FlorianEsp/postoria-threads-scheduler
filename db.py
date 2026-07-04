@@ -6,6 +6,7 @@ from typing import Iterable, Any
 from utils import caption_hash
 
 DB_PATH = Path("postoria_threads.db")
+DEFAULT_PHOTO_GROUP = "A classer"
 
 
 def connect() -> sqlite3.Connection:
@@ -440,7 +441,7 @@ def upsert_photo_group(name: str, note: str = "") -> int:
 
 
 def add_photo_asset(group_name: str, name: str, media_id: str, mime_type: str, image_bytes: bytes, note: str = "") -> int:
-    group_id = upsert_photo_group(group_name)
+    group_id = upsert_photo_group(group_name or DEFAULT_PHOTO_GROUP)
     with connect() as conn:
         cursor = conn.execute(
             """
@@ -457,6 +458,25 @@ def add_photo_asset(group_name: str, name: str, media_id: str, mime_type: str, i
             ),
         )
         return int(cursor.lastrowid)
+
+
+def update_photo_asset(asset_id: int, group_name: str | None = None, media_id: str | None = None, note: str | None = None) -> None:
+    updates: list[str] = []
+    params: list[Any] = []
+    if group_name is not None:
+        updates.append("group_id=?")
+        params.append(upsert_photo_group(group_name or DEFAULT_PHOTO_GROUP))
+    if media_id is not None:
+        updates.append("media_id=?")
+        params.append(str(media_id or "").strip())
+    if note is not None:
+        updates.append("note=?")
+        params.append(str(note or "").strip())
+    if not updates:
+        return
+    params.append(int(asset_id))
+    with connect() as conn:
+        conn.execute(f"UPDATE photo_assets SET {', '.join(updates)} WHERE id=?", tuple(params))
 
 
 def list_photo_groups() -> list[dict[str, Any]]:
