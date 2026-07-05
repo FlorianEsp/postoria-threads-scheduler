@@ -927,6 +927,33 @@ def h(value) -> str:
     return escape(str(value or ""), quote=True)
 
 
+def post_readable_card_html(post: dict, selected: bool, has_media: bool) -> str:
+    caption = str(post.get("caption") or "")
+    text = h(caption).replace("\n", "<br>")
+    media_ids = media_ids_text(post.get("media_ids"))
+    media_folder = str(post.get("media_folder") or "").strip()
+    media_label = media_ids or media_folder or "texte seul"
+    variables = variables_text(post.get("variables"))
+    replies = len(post.get("reply_chain") or [])
+    selected_label = "Sélectionné" if selected else "Non sélectionné"
+    media_class = "has-media" if has_media else "text-only"
+    return (
+        f"<article class='post-readable-card {'is-selected' if selected else ''}'>"
+        "<div class='post-readable-top'>"
+        f"<span>#{int(post.get('id') or 0)}</span>"
+        f"<b>{h(selected_label)}</b>"
+        "</div>"
+        f"<p>{text}</p>"
+        "<div class='post-readable-meta'>"
+        f"<small class='{media_class}'>{h(media_label)}</small>"
+        f"<small>{len(caption)} caractères</small>"
+        f"<small>{replies} replies</small>"
+        f"{f'<small>{h(variables)}</small>' if variables else ''}"
+        "</div>"
+        "</article>"
+    )
+
+
 def choose_option(
     label: str,
     options: list,
@@ -1884,6 +1911,71 @@ st.markdown(
         color: var(--text);
         font-size: 1.18rem;
         font-variant-numeric: tabular-nums;
+    }
+    .post-readable-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 14px;
+        margin: 14px 0 18px;
+    }
+    .post-readable-card {
+        border: 1px solid rgba(255,255,255,.10);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(24,24,27,.74), rgba(12,14,18,.58));
+        padding: 16px;
+        min-width: 0;
+    }
+    .post-readable-card.is-selected {
+        border-color: rgba(244,63,94,.38);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .post-readable-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+    }
+    .post-readable-top span,
+    .post-readable-top b {
+        color: var(--faint);
+        font-size: .76rem;
+        font-weight: 820;
+        letter-spacing: .06em;
+        text-transform: uppercase;
+    }
+    .post-readable-card.is-selected .post-readable-top b {
+        color: var(--accent);
+    }
+    .post-readable-card p {
+        color: rgba(244,244,245,.94);
+        font-size: .98rem;
+        line-height: 1.55;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        margin: 0 0 14px;
+    }
+    .post-readable-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+    }
+    .post-readable-meta small {
+        border: 1px solid rgba(255,255,255,.09);
+        border-radius: 999px;
+        background: rgba(255,255,255,.04);
+        color: var(--muted);
+        padding: 5px 8px;
+        font-size: .74rem;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .post-readable-meta small.has-media {
+        color: rgba(220,252,231,.92);
+        border-color: rgba(34,197,94,.26);
+        background: rgba(34,197,94,.09);
     }
     .posts-editor-wrap {
         border: 1px solid var(--line);
@@ -3414,6 +3506,51 @@ if active_step == 2:
                 st.session_state["_selected_posts_signature"] = tuple(sorted(int(post["id"]) for post in posts_with_media))
                 st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
                 st.rerun()
+
+            readable_a, readable_b, readable_c = st.columns([1, 1.4, 1])
+            with readable_a:
+                readable_filter = choose_option(
+                    "Vue texte",
+                    ["Sélection actuelle", "Tous", "Avec média"],
+                    key="posts_readable_filter",
+                )
+            with readable_b:
+                readable_query = st.text_input("Chercher dans les posts", placeholder="mot, phrase, media ID...", key="posts_readable_query")
+            with readable_c:
+                readable_limit = st.slider("Posts visibles", 6, 60, 18, 6, key="posts_readable_limit")
+
+            readable_posts = []
+            needle = readable_query.strip().lower()
+            for post in posts:
+                post_id = int(post["id"])
+                is_active = bool(post.get("is_active", 1))
+                is_selected = is_active and (default_posts or post_id in selected_post_ids)
+                has_media = bool(db.parse_media_ids(post.get("media_ids")) or str(post.get("media_folder") or "").strip())
+                haystack = " ".join(
+                    [
+                        str(post.get("caption") or ""),
+                        media_ids_text(post.get("media_ids")),
+                        str(post.get("media_folder") or ""),
+                        variables_text(post.get("variables")),
+                    ]
+                ).lower()
+                if readable_filter == "Sélection actuelle" and not is_selected:
+                    continue
+                if readable_filter == "Avec média" and not has_media:
+                    continue
+                if needle and needle not in haystack:
+                    continue
+                readable_posts.append((post, is_selected, has_media))
+
+            if readable_posts:
+                st.caption(f"Aperçu lisible : {min(len(readable_posts), int(readable_limit))} affichés sur {len(readable_posts)} posts filtrés.")
+                cards = "".join(
+                    post_readable_card_html(post, is_selected, has_media)
+                    for post, is_selected, has_media in readable_posts[: int(readable_limit)]
+                )
+                st.markdown(f"<div class='post-readable-grid'>{cards}</div>", unsafe_allow_html=True)
+            else:
+                st.info("Aucun post dans cette vue lisible avec les filtres actuels.")
 
             post_rows = []
             for post in posts:
