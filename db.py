@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Any
 from utils import caption_hash
@@ -152,6 +153,27 @@ def init_db() -> None:
                 reply_chain TEXT DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS post_import_batches (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_type TEXT DEFAULT 'csv',
+                file_name TEXT DEFAULT '',
+                file_hash TEXT DEFAULT '',
+                file_size INTEGER DEFAULT 0,
+                added_count INTEGER DEFAULT 0,
+                reused_count INTEGER DEFAULT 0,
+                skipped_count INTEGER DEFAULT 0,
+                post_count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS post_import_items (
+                batch_id TEXT NOT NULL,
+                post_id INTEGER NOT NULL,
+                status TEXT DEFAULT 'linked',
+                PRIMARY KEY (batch_id, post_id)
+            );
+
             CREATE TABLE IF NOT EXISTS accounts (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -241,6 +263,12 @@ def init_db() -> None:
         _ensure_column(conn, "post_library", "media_folder", "TEXT DEFAULT ''")
         _ensure_column(conn, "post_library", "variables_json", "TEXT DEFAULT ''")
         _ensure_column(conn, "post_library", "reply_chain", "TEXT DEFAULT ''")
+        _ensure_column(conn, "post_import_batches", "file_hash", "TEXT DEFAULT ''")
+        _ensure_column(conn, "post_import_batches", "file_size", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "post_import_batches", "added_count", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "post_import_batches", "reused_count", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "post_import_batches", "skipped_count", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "post_import_batches", "post_count", "INTEGER DEFAULT 0")
         _ensure_column(conn, "accounts", "username", "TEXT")
         _ensure_column(conn, "accounts", "avatar_url", "TEXT")
         _ensure_column(conn, "accounts", "group_name", "TEXT DEFAULT 'tous'")
@@ -324,6 +352,106 @@ def add_posts(posts: Iterable[str | dict[str, Any]]) -> tuple[int, int]:
     return added, skipped
 
 
+def record_post_import_batch(
+    file_name: str,
+    file_hash: str,
+    file_size: int,
+    added_count: int,
+    skipped_count: int,
+    post_ids: Iterable[int],
+    source_type: str = "csv",
+) -> str:
+    clean_ids = sorted({int(post_id) for post_id in post_ids})
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    batch_id = f"csv-{timestamp}-{str(file_hash or '')[:8]}"
+    clean_file_name = str(file_name or "import.csv").strip()
+    reused_count = max(0, len(clean_ids) - int(added_count))
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO post_import_batches
+            (id, name, source_type, file_name, file_hash, file_size, added_count, reused_count, skipped_count, post_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                batch_id,
+                clean_file_name,
+                str(source_type or "csv").strip(),
+                clean_file_name,
+                str(file_hash or "").strip(),
+                int(file_size or 0),
+                int(added_count or 0),
+                int(reused_count or 0),
+                int(skipped_count or 0),
+                len(clean_ids),
+            ),
+        )
+        for post_id in clean_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO post_import_items (batch_id, post_id, status) VALUES (?, ?, 'linked')",
+                (batch_id, int(post_id)),
+            )
+    return batch_id
+
+
+def list_post_import_batches() -> list[dict[str, Any]]:
+    with connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT b.*,
+                       COUNT(i.post_id) AS linked_count,
+                       SUM(CASE WHEN p.is_active = 1 THEN 1 ELSE 0 END) AS active_count
+                FROM post_import_batches b
+                LEFT JOIN post_import_items i ON i.batch_id = b.id
+                LEFT JOIN post_library p ON p.id = i.post_id
+                GROUP BY b.id
+                ORDER BY b.created_at DESC
+                """
+            ).fetchall()
+        ]
+
+
+def post_ids_for_import_batch(batch_id: str) -> list[int]:
+    with connect() as conn:
+        return [
+            int(row["post_id"])
+            for row in conn.execute(
+                "SELECT post_id FROM post_import_items WHERE batch_id=? ORDER BY post_id DESC",
+                (str(batch_id),),
+            ).fetchall()
+        ]
+
+
+def delete_or_deactivate_posts(post_ids: Iterable[int]) -> dict[str, int]:
+    deleted = 0
+    deactivated = 0
+    requested = sorted({int(post_id) for post_id in post_ids})
+    with connect() as conn:
+        for post_id in requested:
+            used_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM scheduled_posts WHERE library_post_id=?",
+                (post_id,),
+            ).fetchone()
+            total_used_row = conn.execute(
+                "SELECT total_used FROM post_library WHERE id=?",
+                (post_id,),
+            ).fetchone()
+            if not total_used_row:
+                continue
+            has_scheduled_rows = bool(used_row and int(used_row["count"] or 0) > 0)
+            has_usage = int(total_used_row["total_used"] or 0) > 0
+            if has_scheduled_rows or has_usage:
+                conn.execute("UPDATE post_library SET is_active=0 WHERE id=?", (post_id,))
+                deactivated += 1
+            else:
+                conn.execute("DELETE FROM post_import_items WHERE post_id=?", (post_id,))
+                conn.execute("DELETE FROM post_library WHERE id=?", (post_id,))
+                deleted += 1
+    return {"deleted": deleted, "deactivated": deactivated, "requested": len(requested)}
+
+
 def update_post_metadata(
     post_id: int,
     media_ids: Any,
@@ -353,10 +481,16 @@ def update_post_metadata(
 
 
 def list_posts(active_only: bool = True) -> list[dict[str, Any]]:
-    query = "SELECT * FROM post_library"
+    query = """
+        SELECT p.*,
+               COALESCE(GROUP_CONCAT(DISTINCT b.file_name), '') AS import_batches
+        FROM post_library p
+        LEFT JOIN post_import_items i ON i.post_id = p.id
+        LEFT JOIN post_import_batches b ON b.id = i.batch_id
+    """
     if active_only:
-        query += " WHERE is_active = 1"
-    query += " ORDER BY id DESC"
+        query += " WHERE p.is_active = 1"
+    query += " GROUP BY p.id ORDER BY p.id DESC"
     with connect() as conn:
         return [_hydrate_media(r) for r in conn.execute(query).fetchall()]
 

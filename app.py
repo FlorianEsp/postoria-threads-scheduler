@@ -933,6 +933,7 @@ def post_readable_card_html(post: dict, selected: bool, has_media: bool) -> str:
     media_ids = media_ids_text(post.get("media_ids"))
     media_folder = str(post.get("media_folder") or "").strip()
     media_label = media_ids or media_folder or "texte seul"
+    import_batches = str(post.get("import_batches") or "").strip()
     variables = variables_text(post.get("variables"))
     replies = len(post.get("reply_chain") or [])
     selected_label = "Sélectionné" if selected else "Non sélectionné"
@@ -948,7 +949,26 @@ def post_readable_card_html(post: dict, selected: bool, has_media: bool) -> str:
         f"<small class='{media_class}'>{h(media_label)}</small>"
         f"<small>{len(caption)} caractères</small>"
         f"<small>{replies} replies</small>"
+        f"{f'<small>{h(import_batches)}</small>' if import_batches else ''}"
         f"{f'<small>{h(variables)}</small>' if variables else ''}"
+        "</div>"
+        "</article>"
+    )
+
+
+def import_batch_card_html(batch: dict, active: bool = False) -> str:
+    created_at = str(batch.get("created_at") or "")[:16]
+    linked = int(batch.get("linked_count") or batch.get("post_count") or 0)
+    active_count = int(batch.get("active_count") or 0)
+    return (
+        f"<article class='import-batch-card {'is-active' if active else ''}'>"
+        f"<strong>{h(batch.get('file_name') or batch.get('name'))}</strong>"
+        f"<span>{h(created_at)}</span>"
+        "<div>"
+        f"<b>{linked}</b><small>posts</small>"
+        f"<b>{active_count}</b><small>actifs</small>"
+        f"<b>{int(batch.get('added_count') or 0)}</b><small>nouveaux</small>"
+        f"<b>{int(batch.get('reused_count') or 0)}</b><small>déjà vus</small>"
         "</div>"
         "</article>"
     )
@@ -1976,6 +1996,61 @@ st.markdown(
         color: rgba(220,252,231,.92);
         border-color: rgba(34,197,94,.26);
         background: rgba(34,197,94,.09);
+    }
+    .import-batch-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 12px;
+        margin: 12px 0 18px;
+    }
+    .import-batch-card {
+        border: 1px solid rgba(255,255,255,.10);
+        border-radius: 14px;
+        background: rgba(17,19,24,.62);
+        padding: 14px;
+        min-width: 0;
+    }
+    .import-batch-card.is-active {
+        border-color: rgba(244,63,94,.42);
+        background: linear-gradient(180deg, rgba(244,63,94,.13), rgba(17,19,24,.66));
+    }
+    .import-batch-card strong,
+    .import-batch-card span {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .import-batch-card strong {
+        color: var(--text);
+        font-size: .92rem;
+    }
+    .import-batch-card span {
+        color: var(--faint);
+        font-size: .74rem;
+        margin-top: 3px;
+    }
+    .import-batch-card div {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 6px;
+        margin-top: 12px;
+    }
+    .import-batch-card b,
+    .import-batch-card small {
+        display: block;
+        text-align: center;
+    }
+    .import-batch-card b {
+        color: var(--text);
+        font-size: 1rem;
+        font-variant-numeric: tabular-nums;
+    }
+    .import-batch-card small {
+        color: var(--faint);
+        font-size: .66rem;
+        text-transform: uppercase;
+        letter-spacing: .05em;
     }
     .posts-editor-wrap {
         border: 1px solid var(--line);
@@ -3378,41 +3453,62 @@ if active_step == 2:
         st.markdown("#### Posts")
         import_col, manual_col = st.columns(2)
         with import_col:
-            uploaded = st.file_uploader(
+            uploaded_files = st.file_uploader(
                 "Importer CSV de contenus",
                 type=["csv"],
+                accept_multiple_files=True,
                 help="Colonnes: text, media_ids, media_folder, reply_1, reply_2. Autres colonnes = variables {colonne}.",
             )
-            if uploaded:
-                csv_bytes = uploaded.getvalue()
-                csv_hash = hashlib.sha256(csv_bytes).hexdigest()
-                already_imported = st.session_state.get("last_imported_csv_hash") == csv_hash
-                st.caption(f"Fichier prêt: {uploaded.name} · {len(csv_bytes)} bytes")
-                if already_imported:
-                    st.info("Ce CSV est déjà importé pour cette session. Choisis un autre fichier ou force un nouvel import si nécessaire.")
-                import_cols = st.columns([1, 1])
-                with import_cols[0]:
-                    import_csv = st.button("Importer ce CSV", disabled=already_imported)
-                with import_cols[1]:
-                    force_import_csv = st.button("Forcer réimport", disabled=not already_imported)
-                if import_csv or force_import_csv:
-                    frame = pd.read_csv(io.BytesIO(csv_bytes))
-                    records = make_post_records(frame)
-                    added, skipped, imported_ids = db.add_posts_with_ids(records)
-                    imported_posts = [
-                        post for post in db.list_posts(active_only=False)
-                        if int(post["id"]) in set(imported_ids)
-                    ]
-                    st.session_state["last_imported_csv_hash"] = csv_hash
-                    st.session_state["last_imported_csv_name"] = uploaded.name
-                    st.session_state["selected_posts"] = imported_posts
-                    st.session_state["posts_selection_explicit"] = True
-                    st.session_state["_selected_posts_signature"] = tuple(sorted(imported_ids))
-                    st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
-                    if imported_ids:
-                        if clear_preview_draft("Preview brouillon supprimée: nouveaux posts importés. Les posts déjà planifiés restent conservés."):
+            if uploaded_files:
+                existing_hashes = {
+                    str(batch.get("file_hash") or "")
+                    for batch in db.list_post_import_batches()
+                    if str(batch.get("file_hash") or "").strip()
+                }
+                prepared_files = []
+                for uploaded in uploaded_files:
+                    csv_bytes = uploaded.getvalue()
+                    csv_hash = hashlib.sha256(csv_bytes).hexdigest()
+                    prepared_files.append((uploaded, csv_bytes, csv_hash, csv_hash in existing_hashes))
+                st.caption(f"{len(prepared_files)} CSV prêts à importer.")
+                already_count = sum(1 for _, _, _, exists in prepared_files if exists)
+                if already_count:
+                    st.info(f"{already_count} fichier(s) semblent déjà enregistrés. Ils seront ignorés sauf si tu forces le réimport.")
+                allow_reimport = st.checkbox("Autoriser le réimport des CSV déjà enregistrés", key="allow_reimport_csv_files")
+                if st.button("Importer les CSV", disabled=not prepared_files, use_container_width=True):
+                    all_imported_ids: set[int] = set()
+                    summaries = []
+                    for uploaded, csv_bytes, csv_hash, exists in prepared_files:
+                        if exists and not allow_reimport:
+                            summaries.append(f"{uploaded.name}: déjà enregistré, ignoré")
+                            continue
+                        frame = pd.read_csv(io.BytesIO(csv_bytes))
+                        records = make_post_records(frame)
+                        added, skipped, imported_ids = db.add_posts_with_ids(records)
+                        db.record_post_import_batch(
+                            uploaded.name,
+                            csv_hash,
+                            len(csv_bytes),
+                            added,
+                            skipped,
+                            imported_ids,
+                        )
+                        all_imported_ids.update(int(post_id) for post_id in imported_ids)
+                        summaries.append(f"{uploaded.name}: {added} nouveaux, {skipped} doublons/vides, {len(set(imported_ids))} liés")
+                    if all_imported_ids:
+                        imported_posts = [
+                            post for post in db.list_posts(active_only=False)
+                            if int(post["id"]) in all_imported_ids
+                        ]
+                        st.session_state["selected_posts"] = imported_posts
+                        st.session_state["posts_selection_explicit"] = True
+                        st.session_state["_selected_posts_signature"] = tuple(sorted(all_imported_ids))
+                        st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                        if clear_preview_draft("Preview brouillon supprimée: nouveaux CSV importés. Les posts déjà planifiés restent conservés."):
                             st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
-                    st.success(f"{added} posts ajoutés, {skipped} doublons réutilisés. Lot actif: {len(imported_posts)} posts du CSV.")
+                    st.success("Import terminé. " + " | ".join(summaries[:4]))
+                    if len(summaries) > 4:
+                        st.caption("Autres fichiers: " + " | ".join(summaries[4:]))
                     posts = db.list_posts(active_only=False)
         with manual_col:
             with st.form("manual_posts"):
@@ -3449,9 +3545,38 @@ if active_step == 2:
                     st.success(f"{added} posts ajoutés, {skipped} doublons réutilisés. Lot actif: {len(imported_posts)} posts.")
                     posts = db.list_posts(active_only=False)
 
-        posts = db.list_posts(active_only=False)
+        all_posts = db.list_posts(active_only=False)
+        import_batches = db.list_post_import_batches()
+        selected_import_filter = "Tous les posts"
+        if import_batches:
+            st.markdown("#### Lots CSV enregistrés")
+            filter_col, hint_col = st.columns([1, 1.4])
+            batch_lookup = {str(batch["id"]): batch for batch in import_batches}
+            with filter_col:
+                selected_import_filter = choose_option(
+                    "Filtrer la bibliothèque",
+                    ["Tous les posts"] + [str(batch["id"]) for batch in import_batches],
+                    key="post_import_batch_filter",
+                    format_func=lambda value: "Tous les posts" if value == "Tous les posts" else (
+                        f"{batch_lookup[str(value)]['file_name']} · {int(batch_lookup[str(value)].get('linked_count') or 0)} posts"
+                    ),
+                )
+            with hint_col:
+                st.caption("Chaque CSV importé reste enregistré ici. Tu peux filtrer un lot précis, puis sélectionner/enlever ses posts.")
+            cards = "".join(
+                import_batch_card_html(batch, active=str(batch["id"]) == str(selected_import_filter))
+                for batch in import_batches[:8]
+            )
+            st.markdown(f"<div class='import-batch-grid'>{cards}</div>", unsafe_allow_html=True)
+
+        if selected_import_filter != "Tous les posts":
+            batch_post_ids = set(db.post_ids_for_import_batch(str(selected_import_filter)))
+            posts = [post for post in all_posts if int(post["id"]) in batch_post_ids]
+        else:
+            posts = all_posts
+
         if not posts:
-            st.warning("Aucun post dans la bibliothèque.")
+            st.warning("Aucun post dans cette vue.")
         else:
             selected_post_ids = {int(p["id"]) for p in st.session_state.get("selected_posts", [])}
             selection_explicit = bool(st.session_state.get("posts_selection_explicit", False))
@@ -3488,8 +3613,9 @@ if active_step == 2:
             quick_a, quick_b, quick_c = st.columns(3)
             if quick_a.button("Tout sélectionner", use_container_width=True):
                 clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
-                st.session_state["selected_posts"] = db.list_posts(active_only=True)
+                st.session_state["selected_posts"] = active_posts
                 st.session_state["posts_selection_explicit"] = True
+                st.session_state["_selected_posts_signature"] = tuple(sorted(int(post["id"]) for post in active_posts))
                 st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
                 st.rerun()
             if quick_b.button("Tout décocher", use_container_width=True):
@@ -3556,6 +3682,7 @@ if active_step == 2:
             for post in posts:
                 post_rows.append(
                     {
+                        "remove": False,
                         "use": bool(post.get("is_active", 1)) and (default_posts or int(post["id"]) in selected_post_ids),
                         "active": bool(post.get("is_active", 1)),
                         "id": int(post["id"]),
@@ -3576,10 +3703,11 @@ if active_step == 2:
                     use_container_width=True,
                     height=560,
                     column_order=[
-                        "use", "caption", "media_ids", "media_folder", "variables",
+                        "remove", "use", "caption", "media_ids", "media_folder", "variables",
                         "reply_chain", "photo_note", "active", "used", "id",
                     ],
                     column_config={
+                        "remove": st.column_config.CheckboxColumn("Enlever", help="Retire localement ce post de la bibliothèque."),
                         "use": st.column_config.CheckboxColumn("Publier", help="Inclus dans la prochaine preview."),
                         "active": st.column_config.CheckboxColumn("Actif", help="Désactive le post dans la bibliothèque."),
                         "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
@@ -3595,9 +3723,33 @@ if active_step == 2:
                     key=f"posts_editor_{st.session_state.get('posts_editor_version', 0)}",
                 )
                 st.markdown("</div>", unsafe_allow_html=True)
-                submit_a, submit_b = st.columns([1, 1])
+                submit_a, submit_b, submit_c = st.columns([1, 1, 1])
                 apply_posts = submit_a.form_submit_button("Appliquer sélection", type="primary", use_container_width=True)
                 save_posts = submit_b.form_submit_button("Sauver posts/photos", use_container_width=True)
+                remove_posts = submit_c.form_submit_button("Enlever cochés", use_container_width=True)
+
+            if remove_posts:
+                ids_to_remove = [int(row["id"]) for _, row in edited_posts.iterrows() if bool(row.get("remove", False))]
+                if not ids_to_remove:
+                    st.warning("Aucun post coché dans la colonne Enlever.")
+                else:
+                    result = db.delete_or_deactivate_posts(ids_to_remove)
+                    removed_ids = set(ids_to_remove)
+                    st.session_state["selected_posts"] = [
+                        post for post in st.session_state.get("selected_posts", [])
+                        if int(post["id"]) not in removed_ids
+                    ]
+                    st.session_state["posts_selection_explicit"] = True
+                    st.session_state["_selected_posts_signature"] = tuple(
+                        sorted(int(post["id"]) for post in st.session_state.get("selected_posts", []))
+                    )
+                    st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                    clear_preview_draft("Preview brouillon supprimée: posts enlevés de la bibliothèque. Les posts déjà planifiés restent conservés.")
+                    st.warning(
+                        f"{result['deleted']} supprimés localement, {result['deactivated']} désactivés car déjà utilisés. "
+                        "Rien n'est supprimé sur Postoria."
+                    )
+                    st.rerun()
 
             if apply_posts or save_posts:
                 if save_posts:
