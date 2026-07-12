@@ -956,6 +956,45 @@ def post_readable_card_html(post: dict, selected: bool, has_media: bool) -> str:
     )
 
 
+def render_post_visual_card(post: dict, selected: bool, has_media: bool, widget_key: str) -> bool:
+    caption = str(post.get("caption") or "")
+    media_ids = media_ids_text(post.get("media_ids"))
+    media_folder = str(post.get("media_folder") or "").strip()
+    import_batches = str(post.get("import_batches") or "").strip()
+    variables = variables_text(post.get("variables"))
+    meta_items = [
+        media_ids or media_folder or "texte seul",
+        f"{len(caption)} caractères",
+        f"{len(post.get('reply_chain') or [])} replies",
+    ]
+    if import_batches:
+        meta_items.append(import_batches)
+    if variables:
+        meta_items.append(variables)
+    st.markdown(
+        "<div class='post-pick-shell'>"
+        "<div class='post-pick-head'>"
+        f"<span>#{int(post.get('id') or 0)}</span>"
+        f"<b>{'Sélectionné' if selected else 'Non sélectionné'}</b>"
+        "</div>"
+        f"<p>{h(caption).replace(chr(10), '<br>')}</p>"
+        "<div class='post-readable-meta'>"
+        + "".join(
+            f"<small class='{'has-media' if idx == 0 and has_media else 'text-only'}'>{h(item)}</small>"
+            for idx, item in enumerate(meta_items)
+        )
+        + "</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    return st.checkbox(
+        "Publier ce post",
+        value=bool(selected),
+        key=widget_key,
+        help="Coche pour inclure ce texte dans la prochaine preview.",
+    )
+
+
 def import_batch_card_html(batch: dict, active: bool = False) -> str:
     created_at = str(batch.get("created_at") or "")[:16]
     linked = int(batch.get("linked_count") or batch.get("post_count") or 0)
@@ -1996,6 +2035,46 @@ st.markdown(
         color: rgba(220,252,231,.92);
         border-color: rgba(34,197,94,.26);
         background: rgba(34,197,94,.09);
+    }
+    .post-pick-shell {
+        border: 1px solid rgba(255,255,255,.10);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(24,24,27,.82), rgba(12,14,18,.62));
+        padding: 18px 18px 14px;
+        min-height: 190px;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+    }
+    .post-pick-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+    }
+    .post-pick-head span,
+    .post-pick-head b {
+        color: var(--faint);
+        font-size: .74rem;
+        font-weight: 820;
+        letter-spacing: .06em;
+        text-transform: uppercase;
+    }
+    .post-pick-head b {
+        color: var(--accent);
+    }
+    .post-pick-shell p {
+        color: rgba(244,244,245,.96);
+        font-size: 1.02rem;
+        line-height: 1.62;
+        margin: 0 0 16px;
+        overflow-wrap: anywhere;
+        white-space: normal;
+    }
+    div[data-testid="stVerticalBlock"]:has(> div .post-pick-shell) {
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 16px;
+        padding: 10px 10px 8px;
+        background: rgba(255,255,255,.025);
     }
     .import-batch-grid {
         display: grid;
@@ -3669,12 +3748,71 @@ if active_step == 2:
                 readable_posts.append((post, is_selected, has_media))
 
             if readable_posts:
-                st.caption(f"Aperçu lisible : {min(len(readable_posts), int(readable_limit))} affichés sur {len(readable_posts)} posts filtrés.")
-                cards = "".join(
-                    post_readable_card_html(post, is_selected, has_media)
-                    for post, is_selected, has_media in readable_posts[: int(readable_limit)]
-                )
-                st.markdown(f"<div class='post-readable-grid'>{cards}</div>", unsafe_allow_html=True)
+                visible_readable_posts = readable_posts[: int(readable_limit)]
+                visible_ids = [int(post["id"]) for post, _, _ in visible_readable_posts]
+                st.caption(f"Sélection visuelle : {len(visible_readable_posts)} affichés sur {len(readable_posts)} posts filtrés.")
+                visual_a, visual_b = st.columns(2)
+                if visual_a.button("Sélectionner les posts affichés", disabled=not visible_ids, use_container_width=True):
+                    base_selected_ids = {
+                        int(post["id"]) for post in active_posts
+                    } if default_posts else set(selected_post_ids)
+                    base_selected_ids.update(visible_ids)
+                    selected_posts_now = [
+                        post for post in all_posts
+                        if int(post["id"]) in base_selected_ids and bool(post.get("is_active", 1))
+                    ]
+                    clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
+                    st.session_state["selected_posts"] = selected_posts_now
+                    st.session_state["posts_selection_explicit"] = True
+                    st.session_state["_selected_posts_signature"] = tuple(sorted(base_selected_ids))
+                    st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                    st.rerun()
+                if visual_b.button("Désélectionner les posts affichés", disabled=not visible_ids, use_container_width=True):
+                    base_selected_ids = {
+                        int(post["id"]) for post in active_posts
+                    } if default_posts else set(selected_post_ids)
+                    base_selected_ids.difference_update(visible_ids)
+                    selected_posts_now = [
+                        post for post in all_posts
+                        if int(post["id"]) in base_selected_ids and bool(post.get("is_active", 1))
+                    ]
+                    clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
+                    st.session_state["selected_posts"] = selected_posts_now
+                    st.session_state["posts_selection_explicit"] = True
+                    st.session_state["_selected_posts_signature"] = tuple(sorted(base_selected_ids))
+                    st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                    st.rerun()
+
+                base_selected_ids = {
+                    int(post["id"]) for post in active_posts
+                } if default_posts else set(selected_post_ids)
+                visual_selected_ids = set(base_selected_ids)
+                card_cols = st.columns(2)
+                for idx, (post, is_selected, has_media) in enumerate(visible_readable_posts):
+                    post_id = int(post["id"])
+                    with card_cols[idx % 2]:
+                        checked = render_post_visual_card(
+                            post,
+                            post_id in base_selected_ids,
+                            has_media,
+                            f"visual_post_use_{post_id}_{st.session_state.get('posts_editor_version', 0)}",
+                        )
+                    if checked:
+                        visual_selected_ids.add(post_id)
+                    else:
+                        visual_selected_ids.discard(post_id)
+
+                if visual_selected_ids != base_selected_ids:
+                    selected_posts_now = [
+                        post for post in all_posts
+                        if int(post["id"]) in visual_selected_ids and bool(post.get("is_active", 1))
+                    ]
+                    clear_preview_draft("Preview brouillon supprimée: sélection de posts changée. Les posts déjà planifiés restent conservés.")
+                    st.session_state["selected_posts"] = selected_posts_now
+                    st.session_state["posts_selection_explicit"] = True
+                    st.session_state["_selected_posts_signature"] = tuple(sorted(visual_selected_ids))
+                    st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                    st.rerun()
             else:
                 st.info("Aucun post dans cette vue lisible avec les filtres actuels.")
 
