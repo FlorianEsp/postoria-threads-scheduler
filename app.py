@@ -961,38 +961,36 @@ def render_post_visual_card(post: dict, selected: bool, has_media: bool, widget_
     media_ids = media_ids_text(post.get("media_ids"))
     media_folder = str(post.get("media_folder") or "").strip()
     import_batches = str(post.get("import_batches") or "").strip()
-    variables = variables_text(post.get("variables"))
-    meta_items = [
-        media_ids or media_folder or "texte seul",
-        f"{len(caption)} caractères",
-        f"{len(post.get('reply_chain') or [])} replies",
-    ]
-    if import_batches:
-        meta_items.append(import_batches)
-    if variables:
-        meta_items.append(variables)
-    st.markdown(
-        "<div class='post-pick-shell'>"
-        "<div class='post-pick-head'>"
-        f"<span>#{int(post.get('id') or 0)}</span>"
-        f"<b>{'Sélectionné' if selected else 'Non sélectionné'}</b>"
-        "</div>"
-        f"<p>{h(caption).replace(chr(10), '<br>')}</p>"
-        "<div class='post-readable-meta'>"
-        + "".join(
-            f"<small class='{'has-media' if idx == 0 and has_media else 'text-only'}'>{h(item)}</small>"
-            for idx, item in enumerate(meta_items)
+    media_label = media_ids or media_folder or "Texte"
+    import_label = import_batches or "Bibliothèque"
+    state_label = "Sélectionné" if selected else "Non sélectionné"
+    checkbox_col, content_col = st.columns([0.28, 5.72], vertical_alignment="center")
+    with checkbox_col:
+        checked = st.checkbox(
+            "Sélectionner ce post",
+            value=bool(selected),
+            key=widget_key,
+            label_visibility="collapsed",
+            help="Coche pour inclure ce texte dans la prochaine preview.",
         )
-        + "</div>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    return st.checkbox(
-        "Publier ce post",
-        value=bool(selected),
-        key=widget_key,
-        help="Coche pour inclure ce texte dans la prochaine preview.",
-    )
+    with content_col:
+        st.markdown(
+            "<article class='post-pick-shell'>"
+            f"<span class='post-pick-kind {'has-media' if has_media else ''}'>{'IMG' if has_media else 'T'}</span>"
+            "<div class='post-pick-copy'>"
+            f"<p>{h(caption).replace(chr(10), '<br>')}</p>"
+            "<div class='post-pick-details'>"
+            f"<span>#{int(post.get('id') or 0)}</span>"
+            f"<span>{h(media_label)}</span>"
+            f"<span>{len(caption)} caractères</span>"
+            f"<span>{h(import_label)}</span>"
+            "</div>"
+            "</div>"
+            f"<span class='post-pick-state {'is-selected' if selected else ''}'>{h(state_label)}</span>"
+            "</article>",
+            unsafe_allow_html=True,
+        )
+    return checked
 
 
 def import_batch_card_html(batch: dict, active: bool = False) -> str:
@@ -2713,6 +2711,105 @@ st.markdown(
         font-size: .78rem;
         margin-top: 2px;
     }
+    /* Dense post library: text stays primary; selection and metadata stay compact. */
+    div[data-testid="stHorizontalBlock"]:has(.post-pick-shell) {
+        align-items: stretch !important;
+        gap: 0 !important;
+        margin: 0 !important;
+        border: 1px solid var(--line);
+        border-bottom: 0;
+        background: rgba(24, 24, 27, .54);
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-pick-shell):first-of-type {
+        border-radius: 10px 10px 0 0;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-pick-shell) > div:first-child {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 52px;
+        border-right: 1px solid var(--line);
+        background: rgba(9, 9, 11, .22);
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-pick-shell) > div:first-child label {
+        margin: 0 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-pick-shell) > div:last-child {
+        min-width: 0;
+    }
+    .post-pick-shell {
+        display: grid;
+        grid-template-columns: 38px minmax(0, 1fr) auto;
+        align-items: center;
+        column-gap: 13px;
+        min-height: 68px;
+        padding: 10px 14px;
+        border: 0 !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+    .post-pick-kind {
+        display: grid;
+        width: 38px;
+        height: 38px;
+        place-items: center;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, .045);
+        color: var(--faint);
+        font-size: .66rem;
+        font-weight: 800;
+        letter-spacing: .06em;
+    }
+    .post-pick-kind.has-media {
+        color: rgba(220, 252, 231, .92);
+        background: rgba(47, 191, 123, .10);
+    }
+    .post-pick-copy {min-width: 0;}
+    .post-pick-shell p {
+        display: -webkit-box;
+        margin: 0 !important;
+        overflow: hidden;
+        color: var(--text);
+        font-size: .96rem !important;
+        font-weight: 620;
+        line-height: 1.35 !important;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+    }
+    .post-pick-details {
+        display: flex;
+        gap: 10px;
+        min-width: 0;
+        margin-top: 4px;
+        color: var(--faint);
+        font-size: .72rem;
+        line-height: 1.2;
+        white-space: nowrap;
+    }
+    .post-pick-details span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .post-pick-details span:not(:last-child)::after {
+        content: "·";
+        margin-left: 10px;
+        color: rgba(255, 255, 255, .22);
+    }
+    .post-pick-state {
+        justify-self: end;
+        color: var(--faint);
+        font-size: .72rem;
+        font-weight: 720;
+        white-space: nowrap;
+    }
+    .post-pick-state.is-selected {color: var(--accent);}
+    div[data-testid="stVerticalBlock"]:has(> div .post-pick-shell) {
+        border: 0 !important;
+        border-radius: 0 !important;
+        padding: 0 !important;
+        background: transparent !important;
+    }
     @media (max-width: 900px) {
         .block-container {
             padding: 1.3rem 1rem 4rem !important;
@@ -2744,6 +2841,15 @@ st.markdown(
         .preview-card-grid {
             grid-template-columns: 1fr;
         }
+        .post-pick-shell {
+            grid-template-columns: 34px minmax(0, 1fr);
+            min-height: 62px;
+            padding: 10px 12px;
+            column-gap: 10px;
+        }
+        .post-pick-kind {width: 34px; height: 34px;}
+        .post-pick-state {display: none;}
+        .post-pick-details span:nth-child(n + 3) {display: none;}
         .mobile-account-card {
             display: block;
             border-top: 1px solid var(--line);
@@ -3787,16 +3893,14 @@ if active_step == 2:
                     int(post["id"]) for post in active_posts
                 } if default_posts else set(selected_post_ids)
                 visual_selected_ids = set(base_selected_ids)
-                card_cols = st.columns(2)
-                for idx, (post, is_selected, has_media) in enumerate(visible_readable_posts):
+                for post, is_selected, has_media in visible_readable_posts:
                     post_id = int(post["id"])
-                    with card_cols[idx % 2]:
-                        checked = render_post_visual_card(
-                            post,
-                            post_id in base_selected_ids,
-                            has_media,
-                            f"visual_post_use_{post_id}_{st.session_state.get('posts_editor_version', 0)}",
-                        )
+                    checked = render_post_visual_card(
+                        post,
+                        post_id in base_selected_ids,
+                        has_media,
+                        f"visual_post_use_{post_id}_{st.session_state.get('posts_editor_version', 0)}",
+                    )
                     if checked:
                         visual_selected_ids.add(post_id)
                     else:
