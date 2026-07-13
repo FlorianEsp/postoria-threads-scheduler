@@ -1073,6 +1073,39 @@ def render_group_cards(groups: list[dict], grouped: dict[str, dict] | None = Non
     st.markdown("<div class='group-strip'>" + "".join(chips) + "</div>", unsafe_allow_html=True)
 
 
+def render_accounts_group_board(
+    groups: list[dict],
+    group_accounts_by_name: dict[str, list[dict]],
+    selected_group_filters: list[str],
+) -> None:
+    chips = []
+    selected_names = set(selected_group_filters)
+    for group in groups:
+        group_name = str(group["name"])
+        dot, _ = group_color(group_name, group.get("color"))
+        group_accounts = group_accounts_by_name.get(group_name, [])
+        selected_count = sum(
+            1
+            for account in group_accounts
+            if st.session_state.get(f"account_use_{int(account['id'])}", False)
+        )
+        chips.append(
+            f"<div class='accounts-group-chip {'is-selected' if group_name in selected_names else ''}'>"
+            f"<i style='background:{dot};'></i>"
+            f"<span>{h(group_name)}</span>"
+            f"<b>{selected_count}/{len(group_accounts)}</b>"
+            "</div>"
+        )
+    content = "".join(chips) or "<span class='accounts-group-empty'>Aucun groupe créé</span>"
+    st.markdown(
+        "<section class='accounts-group-board'>"
+        "<header><span>GROUPES</span><small>La sélection se règle juste dessous</small></header>"
+        f"<div>{content}</div>"
+        "</section>",
+        unsafe_allow_html=True,
+    )
+
+
 def section_intro(step: str, title: str, body: str) -> None:
     st.markdown(
         "<div class='section-intro'>"
@@ -3312,6 +3345,171 @@ st.markdown(
         font-variant-numeric: tabular-nums;
         text-align: right;
     }
+    .accounts-heading {
+        margin: 28px 0 20px;
+    }
+    .accounts-heading span {
+        display: block;
+        margin-bottom: 9px;
+        color: var(--faint);
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .12em;
+    }
+    .accounts-heading h1 {
+        margin: 0 !important;
+        color: var(--text);
+        font-size: clamp(2.1rem, 3.3vw, 3rem) !important;
+        font-weight: 780;
+        line-height: 1;
+    }
+    .accounts-heading p {
+        margin: 10px 0 0;
+        color: var(--muted);
+        font-size: .94rem;
+    }
+    .accounts-group-board {
+        margin: 16px 0 12px;
+        padding: 16px 20px 18px;
+        border: 1px solid rgba(255,255,255,.10);
+        border-radius: 12px;
+        background: #18181b;
+    }
+    .accounts-group-board header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+    }
+    .accounts-group-board header span {
+        color: var(--faint);
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .1em;
+    }
+    .accounts-group-board header small {
+        color: var(--faint);
+        font-size: .74rem;
+    }
+    .accounts-group-board > div {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 20px;
+        align-items: center;
+    }
+    .accounts-group-chip {
+        display: inline-grid;
+        grid-template-columns: 10px minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        min-width: 120px;
+        color: var(--muted);
+        font-size: .86rem;
+    }
+    .accounts-group-chip i {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        box-shadow: 0 0 0 8px rgba(255,255,255,.025);
+    }
+    .accounts-group-chip span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .accounts-group-chip b {
+        min-width: 32px;
+        padding: 3px 6px;
+        border-radius: 5px;
+        background: rgba(0,0,0,.22);
+        color: var(--faint);
+        font-size: .7rem;
+        font-weight: 740;
+        text-align: center;
+    }
+    .accounts-group-chip.is-selected {color: var(--text);}
+    .accounts-group-chip.is-selected b {color: var(--accent);}
+    .accounts-group-empty {color: var(--muted); font-size: .84rem;}
+    .accounts-selection-line {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        margin: 16px 0 10px;
+        padding: 0 2px;
+    }
+    .accounts-selection-line strong {
+        color: var(--text);
+        font-size: .86rem;
+        font-weight: 720;
+    }
+    .accounts-selection-line span {
+        color: var(--faint);
+        font-size: .78rem;
+        text-align: right;
+    }
+    .accounts-shell-lite {
+        margin-top: 10px !important;
+        border-radius: 12px 12px 0 0 !important;
+        background: #18181b !important;
+    }
+    .account-table-head {
+        grid-template-columns: 44px 2.2fr 1.1fr 1fr .9fr .9fr;
+        min-height: 54px;
+        padding: 12px 18px;
+        letter-spacing: .1em;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) {
+        align-items: center !important;
+        min-height: 76px;
+        margin: 0 !important;
+        padding: 4px 18px;
+        border-right: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        border-left: 1px solid var(--line);
+        background: rgba(24,24,27,.72);
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person):hover {
+        background: rgba(255,255,255,.025);
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) > div {
+        min-width: 0;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stCheckbox"] {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stRadio"] {
+        margin: 0 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stRadio"] [role="radiogroup"] {
+        gap: 4px;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stRadio"] label {
+        margin: 0 !important;
+        font-size: .72rem !important;
+    }
+    .account-row-divider {display: none;}
+    .account-person {
+        grid-template-columns: 42px minmax(0, 1fr);
+        gap: 10px;
+        min-height: 58px;
+    }
+    .account-avatar, .account-avatar-fallback {
+        width: 40px;
+        height: 40px;
+    }
+    .account-name strong {font-size: .9rem;}
+    .account-name small {font-size: .78rem;}
+    .account-group-badge {
+        padding: 5px 8px;
+        font-size: .76rem;
+    }
+    .next-post-pill, .status-text {font-size: .78rem;}
+    .account-actions a {
+        padding: 5px 7px;
+        font-size: .74rem;
+    }
     @media (max-width: 900px) {
         .block-container {
             padding: 1.3rem 1rem 4rem !important;
@@ -3334,6 +3532,11 @@ st.markdown(
         .dashboard-grid {grid-template-columns: 1fr;}
         .dashboard-accounts {grid-column: auto;}
         .dashboard-chart-bars {gap: 8px; padding: 20px 16px 14px;}
+        .accounts-heading {margin-top: 20px;}
+        .accounts-group-board {padding: 14px;}
+        .accounts-group-board header small {display: none;}
+        .accounts-selection-line {align-items: flex-start; flex-direction: column;}
+        .accounts-selection-line span {text-align: left;}
         .app-hero, .metric-strip, .flow-rail {
             grid-template-columns: 1fr;
         }
@@ -3434,41 +3637,43 @@ if active_page == "dashboard":
     render_dashboard_overview(stored_accounts, posts, preview, scheduled_all)
 
 if active_page != "dashboard" and active_step == 0:
-    st.subheader("Comptes et groupes")
-    section_intro(
-        "Étape 1",
-        "Crée tes groupes, assigne les comptes, puis sélectionne les groupes à inclure.",
-        "Choisir un groupe sélectionne tous ses comptes. Tu peux ensuite décocher certains comptes dans le tableau.",
+    st.markdown(
+        "<section class='accounts-heading'>"
+        "<span>COMPTES</span><h1>Threads Accounts</h1>"
+        "<p>Gère les groupes, sélectionne les comptes, puis passe à la cadence.</p>"
+        "</section>",
+        unsafe_allow_html=True,
     )
-    if not client:
-        st.warning("Ajoute POSTORIA_API_KEY dans .env pour récupérer les comptes.")
-    else:
-        load_col, workspace_col = st.columns([1, 2])
-        with load_col:
-            if st.button("Récupérer workspaces"):
-                try:
-                    st.session_state["workspaces"] = client.list_workspaces()
-                except Exception as e:
-                    st.error(str(e))
-        workspaces = st.session_state.get("workspaces", [])
-        with workspace_col:
-            if workspaces:
-                workspace_ids = [w["id"] for w in workspaces]
-                workspace_id = choose_option(
-                    "Workspace",
-                    workspace_ids,
-                    format_func=lambda wid: next(w["name"] for w in workspaces if w["id"] == wid),
-                )
-                st.session_state["workspace_id"] = workspace_id
-                if st.button("Charger comptes Threads"):
+    with st.expander("Synchronisation Postoria", expanded=False):
+        if not client:
+            st.warning("Ajoute POSTORIA_API_KEY dans .env pour récupérer les comptes.")
+        else:
+            load_col, workspace_col = st.columns([1, 2])
+            with load_col:
+                if st.button("Récupérer workspaces"):
                     try:
-                        accounts = client.list_social_accounts(int(workspace_id))
-                        threads_accounts = [a for a in accounts if str(a.get("network", "")).lower() == "threads"]
-                        db.upsert_accounts(threads_accounts)
-                        st.session_state["threads_accounts"] = db.list_accounts()
-                        st.success(f"{len(threads_accounts)} comptes Threads trouvés.")
+                        st.session_state["workspaces"] = client.list_workspaces()
                     except Exception as e:
                         st.error(str(e))
+            workspaces = st.session_state.get("workspaces", [])
+            with workspace_col:
+                if workspaces:
+                    workspace_ids = [w["id"] for w in workspaces]
+                    workspace_id = choose_option(
+                        "Workspace",
+                        workspace_ids,
+                        format_func=lambda wid: next(w["name"] for w in workspaces if w["id"] == wid),
+                    )
+                    st.session_state["workspace_id"] = workspace_id
+                    if st.button("Charger comptes Threads"):
+                        try:
+                            accounts = client.list_social_accounts(int(workspace_id))
+                            threads_accounts = [a for a in accounts if str(a.get("network", "")).lower() == "threads"]
+                            db.upsert_accounts(threads_accounts)
+                            st.session_state["threads_accounts"] = db.list_accounts()
+                            st.success(f"{len(threads_accounts)} comptes Threads trouvés.")
+                        except Exception as e:
+                            st.error(str(e))
 
     accounts = st.session_state.get("threads_accounts") or db.list_accounts()
     if not accounts:
@@ -3486,9 +3691,14 @@ if active_page != "dashboard" and active_step == 0:
             for group_name in group_options
         }
 
-        st.caption("Action principale: prends un groupe ou tous les comptes actifs. Ensuite ajuste seulement les exceptions dans la liste.")
-        preset_a, preset_c = st.columns([1, 1])
-        if preset_a.button("Tous les comptes actifs"):
+        group_action_a, group_action_b, group_action_c = st.columns([1.2, 1, 2.4])
+        with group_action_a:
+            all_active = st.button("Sélectionner tous les actifs", use_container_width=True)
+        with group_action_b:
+            create_group = st.button("+ Créer un groupe", use_container_width=True)
+        with group_action_c:
+            st.caption("Choisis d'abord des groupes, puis ajuste seulement les exceptions dans le tableau.")
+        if all_active:
             st.session_state["selected_group_filters"] = group_options
             st.session_state["manual_included_accounts"] = []
             st.session_state["manual_excluded_accounts"] = []
@@ -3497,7 +3707,7 @@ if active_page != "dashboard" and active_step == 0:
                 account_id = int(account["id"])
                 st.session_state[f"account_use_{account_id}"] = bool(account.get("active_for_day", 1))
             st.rerun()
-        if preset_c.button("Créer un groupe rapide"):
+        if create_group:
             st.session_state["show_group_dialog"] = True
             st.rerun()
         if st.session_state.get("show_group_dialog"):
@@ -3521,37 +3731,27 @@ if active_page != "dashboard" and active_step == 0:
                     st.session_state[f"account_use_{account_id}"] = base_use
             st.session_state["_account_group_signature"] = group_signature
 
-        group_cols = st.columns(min(3, max(1, len(groups))))
-        for idx, group in enumerate(groups):
-            group_name = group["name"]
-            group_accounts = group_accounts_by_name.get(group_name, [])
-            selected_in_group = sum(
-                1 for account in group_accounts
-                if st.session_state.get(f"account_use_{int(account['id'])}", False)
-            )
-            with group_cols[idx % len(group_cols)]:
+        render_accounts_group_board(groups, group_accounts_by_name, selected_group_filters)
+        with st.expander("Modifier les groupes sélectionnés", expanded=False):
+            st.caption("Choisis les groupes qui participent à cette planification.")
+            group_cols = st.columns(min(3, max(1, len(groups))))
+            for idx, group in enumerate(groups):
+                group_name = group["name"]
+                group_accounts = group_accounts_by_name.get(group_name, [])
                 group_is_selected = group_name in st.session_state.get("selected_group_filters", [])
-                st.markdown(
-                    "<div class='step-note'>"
-                    f"{render_group_badge(group_name, group.get('color'))}<br>"
-                    f"<b>{selected_in_group}/{len(group_accounts)}</b> comptes sélectionnés"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-                group_key = f"{idx}_{widget_slug(group_name)}"
-                action_label = "Enlever ce groupe" if group_is_selected else "Utiliser ce groupe"
-                if st.button(action_label, key=f"toggle_group_{group_key}", disabled=not group_accounts):
-                    selected = set(st.session_state.get("selected_group_filters", []))
-                    if group_is_selected:
-                        selected.discard(group_name)
-                    else:
-                        selected.add(group_name)
-                    st.session_state["selected_group_filters"] = [name for name in group_options if name in selected]
-                    st.session_state.pop("_account_group_signature", None)
-                    st.rerun()
-
-        with st.expander("Sélection avancée par nom de groupe"):
-            st.caption("Coche uniquement les groupes à inclure. Aucun champ texte ici.")
+                with group_cols[idx % len(group_cols)]:
+                    group_key = f"{idx}_{widget_slug(group_name)}"
+                    action_label = f"Retirer {group_name}" if group_is_selected else f"Utiliser {group_name}"
+                    if st.button(action_label, key=f"toggle_group_{group_key}", disabled=not group_accounts):
+                        selected = set(st.session_state.get("selected_group_filters", []))
+                        if group_is_selected:
+                            selected.discard(group_name)
+                        else:
+                            selected.add(group_name)
+                        st.session_state["selected_group_filters"] = [name for name in group_options if name in selected]
+                        st.session_state.pop("_account_group_signature", None)
+                        st.rerun()
+            st.divider()
             current_groups = set(st.session_state.get("selected_group_filters", []))
             advanced_groups = []
             for group_name in group_options:
@@ -3566,20 +3766,6 @@ if active_page != "dashboard" and active_step == 0:
                 st.session_state["selected_group_filters"] = advanced_groups
                 st.session_state.pop("_account_group_signature", None)
                 st.rerun()
-
-        selected_group_filters = st.session_state.get("selected_group_filters", [])
-        render_group_cards(groups, st.session_state.get("grouped_accounts", {}))
-        if selected_group_filters:
-            selected_labels = []
-            for group_name in selected_group_filters:
-                group_accounts = group_accounts_by_name.get(group_name, [])
-                selected_labels.append(f"{group_name} ({len(group_accounts)})")
-            st.caption("Groupes retenus : " + ", ".join(selected_labels))
-        else:
-            st.info("Prends un groupe ou choisis tous les comptes actifs pour commencer.")
-
-        st.markdown("#### Ajuster seulement les exceptions")
-        st.caption("Décoche un compte, change son groupe ou mets-le en pause seulement si nécessaire.")
 
         for account in accounts:
             account_id = int(account["id"])
@@ -3622,10 +3808,9 @@ if active_page != "dashboard" and active_step == 0:
         selected_visible = sum(1 for account in visible_accounts if st.session_state.get(f"account_use_{int(account['id'])}", False))
         paused_visible = sum(1 for account in visible_accounts if not st.session_state.get(f"account_active_{int(account['id'])}", True))
         st.markdown(
-            "<div class='account-selection-summary'>"
-            f"<div><span>Sélection totale</span><strong>{selected_total}</strong></div>"
-            f"<div><span>Dans la vue</span><strong>{selected_visible}/{len(visible_accounts)}</strong></div>"
-            f"<div><span>Paused visibles</span><strong>{paused_visible}</strong></div>"
+            "<div class='accounts-selection-line'>"
+            f"<strong>{selected_total} comptes sélectionnés</strong>"
+            f"<span>{selected_visible}/{len(visible_accounts)} dans cette vue · {paused_visible} en pause</span>"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -3634,7 +3819,7 @@ if active_page != "dashboard" and active_step == 0:
             account for account in accounts
             if st.session_state.get(f"account_use_{int(account['id'])}", False)
         ]
-        with st.container(border=True):
+        with st.expander(f"Comptes sélectionnés ({len(selected_accounts_preview)})", expanded=False):
             header_left, header_right = st.columns([2, 1])
             with header_left:
                 st.markdown(f"**Comptes sélectionnés · {len(selected_accounts_preview)}**")
@@ -3677,7 +3862,7 @@ if active_page != "dashboard" and active_step == 0:
         st.markdown(
             "<div class='accounts-shell-lite'>"
             "<div class='account-table-head'>"
-            "<span></span><span>Username</span><span>Group</span><span>Next post</span><span>Status</span><span>Actions</span>"
+            "<span></span><span>COMPTE</span><span>GROUPE</span><span>PROCHAIN POST</span><span>STATUT</span><span>ACTIONS</span>"
             "</div>"
             "</div>",
             unsafe_allow_html=True,
