@@ -87,6 +87,7 @@ def generate_schedule(
     publish_date: date,
     start_time: time,
     end_time: time,
+    publish_end_date: date | None = None,
     posts_per_account: int = 17,
     posts_per_account_max: int | None = None,
     min_interval_minutes: int = 75,
@@ -108,9 +109,9 @@ def generate_schedule(
 
     tz = ZoneInfo(tz_name)
     start_dt = datetime.combine(publish_date, start_time).replace(tzinfo=tz)
-    end_dt = datetime.combine(publish_date, end_time).replace(tzinfo=tz)
+    end_dt = datetime.combine(publish_end_date or publish_date, end_time).replace(tzinfo=tz)
     if end_dt <= start_dt:
-        raise ValueError("Le timeframe doit commencer avant de finir et rester sur une journée.")
+        raise ValueError("La fin du planning doit être après son début.")
 
     required_minutes = max_posts * min_interval_minutes
     available_minutes = int((end_dt - start_dt).total_seconds() / 60)

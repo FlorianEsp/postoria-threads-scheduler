@@ -118,6 +118,7 @@ def variables_text(value: dict | None) -> str:
 def settings() -> dict:
     defaults = {
         "publish_date": datetime.now(ZoneInfo(APP_TZ)).date(),
+        "publish_end_date": datetime.now(ZoneInfo(APP_TZ)).date(),
         "start_time": time(4, 0),
         "end_time": time(23, 0),
         "count_mode": "Exact",
@@ -752,6 +753,16 @@ def is_past_scheduled(row: dict, now: datetime | None = None) -> bool:
 
 def max_posts_for_window(start: time, end: time, min_gap: int) -> int:
     minutes = window_minutes(start, end)
+    if minutes <= 0:
+        return 0
+    return floor(minutes / max(1, min_gap))
+
+
+def max_posts_for_period(start_date: date, end_date: date, start: time, end: time, min_gap: int) -> int:
+    """Return the conservative per-account capacity for a scheduling period."""
+    start_dt = datetime.combine(start_date, start)
+    end_dt = datetime.combine(end_date, end)
+    minutes = int((end_dt - start_dt).total_seconds() / 60)
     if minutes <= 0:
         return 0
     return floor(minutes / max(1, min_gap))
@@ -3526,24 +3537,34 @@ st.markdown(
     div[data-testid="stForm"]:has(.cadence-form-anchor) [data-testid="stHorizontalBlock"] {
         gap: .85rem !important;
     }
+    div[data-testid="stForm"]:has(.cadence-form-anchor) [data-testid="stNumberInput"] input,
+    div[data-testid="stForm"]:has(.cadence-form-anchor) [data-testid="stDateInput"] input,
+    div[data-testid="stForm"]:has(.cadence-form-anchor) [data-testid="stTimeInput"] input {
+        min-height: 42px !important;
+        padding-block: .45rem !important;
+    }
+    div[data-testid="stForm"]:has(.cadence-form-anchor) [data-testid="stNumberInput"],
+    div[data-testid="stForm"]:has(.cadence-form-anchor) [data-testid="stDateInput"],
+    div[data-testid="stForm"]:has(.cadence-form-anchor) [data-testid="stTimeInput"] {
+        margin-bottom: 0 !important;
+    }
     .cadence-section-label {
         margin: 0 0 6px;
         color: var(--muted);
         font-size: .78rem;
         font-weight: 760;
     }
-    .cadence-mini-info {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 1px;
-        overflow: hidden;
-        border: 1px solid var(--line);
-        border-radius: 9px;
-        background: var(--line);
+    .cadence-total-card {
+        min-height: 109px;
+        box-sizing: border-box;
+        padding: 15px 16px;
+        border: 1px solid rgba(244,63,94,.4);
+        border-radius: 10px;
+        background: linear-gradient(135deg, rgba(244,63,94,.16), rgba(244,63,94,.045));
     }
-    .cadence-mini-info div {padding: 11px 12px; background: #151518;}
-    .cadence-mini-info span {display: block; color: var(--faint); font-size: .72rem;}
-    .cadence-mini-info strong {display: block; margin-top: 4px; color: var(--text); font-size: .9rem;}
+    .cadence-total-card span {display:block; color:#fb7185; font-size:.68rem; font-weight:800; letter-spacing:.1em;}
+    .cadence-total-card strong {display:block; margin:2px 0; color:#fff1f3; font-size:2.25rem; font-weight:850; line-height:1;}
+    .cadence-total-card small {display:block; color:var(--muted); font-size:.76rem;}
     .cadence-capacity {margin: 6px 0 0; color: var(--faint); font-size: .76rem;}
     .cadence-submit-summary {
         display: flex;
@@ -3799,7 +3820,9 @@ scheduled_all = db.list_scheduled()
 selected_accounts_count = len(st.session_state.get("selected_accounts", []))
 selected_posts_count = len(st.session_state.get("selected_posts", []))
 current = settings()
-capacity_now = max_posts_for_window(current["start_time"], current["end_time"], int(current["min_interval"]))
+capacity_now = max_posts_for_period(
+    current["publish_date"], current["publish_end_date"], current["start_time"], current["end_time"], int(current["min_interval"])
+)
 accounts_ready = selected_accounts_count > 0
 cadence_ready = accounts_ready and int(current["posts_max"]) <= capacity_now
 posts_ready = selected_posts_count > 0 or int(current["posts_max"]) == 0
@@ -4231,6 +4254,7 @@ if active_page != "dashboard" and active_step == 1:
         current = settings()
         cadence_signature = (
             current["publish_date"],
+            current["publish_end_date"],
             current["start_time"],
             current["end_time"],
             current["count_mode"],
@@ -4243,6 +4267,8 @@ if active_page != "dashboard" and active_step == 1:
         )
         if st.session_state.get("_cadence_form_signature") != cadence_signature:
             st.session_state["cadence_publish_date"] = current["publish_date"]
+            st.session_state["cadence_publish_end_date"] = current["publish_end_date"]
+            st.session_state["cadence_day_mode"] = "2 jours" if current["publish_end_date"] > current["publish_date"] else "1 jour"
             st.session_state["cadence_start_time"] = current["start_time"]
             st.session_state["cadence_end_time"] = current["end_time"]
             st.session_state["cadence_count_mode"] = current["count_mode"]
@@ -4274,30 +4300,39 @@ if active_page != "dashboard" and active_step == 1:
             f"<div class='cadence-summary-top'><i></i><b>{selected_count} comptes</b> · {selected_group_count} groupes</div></section>",
             unsafe_allow_html=True,
         )
-        mode_col, mode_hint_col = st.columns([1, 3])
-        with mode_col:
-            count_mode = st.radio(
-                "Posts par compte",
-                ["Exact", "Range"],
-                horizontal=True,
-                key="cadence_count_mode",
-                help="Exact: même volume pour chaque compte. Range: un nombre aléatoire entre min et max.",
-            )
-        with mode_hint_col:
-            st.caption("Rotate garde l'ordre des textes. Random mélange les textes avant leur attribution.")
+        day_mode = st.radio(
+            "Durée du planning",
+            ["1 jour", "2 jours"],
+            horizontal=True,
+            key="cadence_day_mode",
+            help="Sur 2 jours, les publications peuvent être réparties entre la première date et la deuxième date.",
+        )
+        count_mode = st.radio(
+            "Posts par compte",
+            ["Exact", "Range"],
+            horizontal=True,
+            key="cadence_count_mode",
+            help="Exact: même volume pour chaque compte. Range: un nombre aléatoire entre min et max.",
+        )
         with st.form("cadence_settings_form"):
             st.markdown("<span class='cadence-form-anchor'></span>", unsafe_allow_html=True)
-            date_col, start_col, end_col, order_col = st.columns([1, .82, .82, 1.15])
+            date_col, end_date_col, start_col, end_col = st.columns([1, 1, .82, .82])
             with date_col:
-                publish_date = st.date_input("Date", key="cadence_publish_date")
+                publish_date = st.date_input("Date de début", key="cadence_publish_date")
+            with end_date_col:
+                publish_end_date = st.date_input(
+                    "Date de fin",
+                    key="cadence_publish_end_date",
+                    disabled=day_mode == "1 jour",
+                )
+                if day_mode == "1 jour":
+                    publish_end_date = publish_date
             with start_col:
                 start_time = st.time_input("Début", key="cadence_start_time")
             with end_col:
                 end_time = st.time_input("Fin", key="cadence_end_time")
-            with order_col:
-                caption_mode = st.radio("Ordre des textes", ["Rotate", "Random"], horizontal=True, key="cadence_caption_mode")
 
-            posts_col, interval_col, summary_col = st.columns([1.25, .82, 1.45])
+            posts_col, interval_col, summary_col = st.columns([1.05, .9, 1.35])
             with posts_col:
                 st.markdown("<div class='cadence-section-label'>Posts par compte</div>", unsafe_allow_html=True)
                 if count_mode == "Exact":
@@ -4317,40 +4352,33 @@ if active_page != "dashboard" and active_step == 1:
                     "Écart min (min)", min_value=1, max_value=1440, step=1,
                     key="cadence_min_interval", help="Temps minimum entre deux posts du même compte.",
                 )
-                max_possible = max_posts_for_window(start_time, end_time, int(min_interval))
+                max_possible = max_posts_for_period(publish_date, publish_end_date, start_time, end_time, int(min_interval))
                 st.markdown(f"<p class='cadence-capacity'>Capacité: {max_possible} posts max / compte</p>", unsafe_allow_html=True)
             with summary_col:
                 total_min, total_max = planned_total_range(selected_count, int(posts_min), int(posts_max))
-                first_slot = f"{publish_date.strftime('%d/%m')} · {start_time.strftime('%H:%M')}"
-                last_slot = f"{publish_date.strftime('%d/%m')} · {end_time.strftime('%H:%M')}"
                 st.markdown(
-                    "<div class='cadence-mini-info'>"
-                    f"<div><span>Premier créneau</span><strong>{first_slot}</strong></div>"
-                    f"<div><span>Dernier créneau</span><strong>{last_slot}</strong></div>"
-                    "</div>", unsafe_allow_html=True,
+                    "<div class='cadence-total-card'>"
+                    "<span>PUBLICATIONS À CRÉER</span>"
+                    f"<strong>{total_min if total_min == total_max else f'{total_min}-{total_max}'}</strong>"
+                    f"<small>{selected_count} comptes · {posts_min if posts_min == posts_max else f'{posts_min}-{posts_max}'} posts / compte</small>"
+                    "</div>",
+                    unsafe_allow_html=True,
                 )
                 if int(posts_max) > max_possible:
                     st.error(f"Maximum possible: {max_possible} posts par compte avec cette fenêtre.")
                 elif int(posts_max) == 0:
                     st.warning("0 post: la prochaine preview sera vide.")
 
-            with st.expander("Options avancées", expanded=False):
-                avoid_same_text = st.checkbox("Éviter le même texte sur deux comptes trop proches", key="cadence_avoid_same_text")
-                same_text_gap = st.number_input(
-                    "Écart min pour réutiliser le même texte sur un autre compte (min)",
-                    min_value=1, max_value=1440, step=1, key="cadence_same_text_gap", disabled=not avoid_same_text,
-                )
-            st.markdown(
-                "<div class='cadence-submit-summary'>"
-                f"<span>{selected_count} comptes · {posts_min if posts_min == posts_max else f'{posts_min}-{posts_max}'} posts / compte</span>"
-                f"<strong>{total_min if total_min == total_max else f'{total_min}-{total_max}'} publications à créer</strong>"
-                "</div>", unsafe_allow_html=True,
-            )
+            caption_mode = st.radio("Ordre des textes", ["Rotate", "Random"], horizontal=True, key="cadence_caption_mode")
+            # Hidden from this compact screen, but preserved for existing plans.
+            avoid_same_text = bool(current.get("avoid_same_text", False))
+            same_text_gap = int(current.get("same_text_gap", 60))
             apply_cadence = st.form_submit_button("Appliquer cadence", type="primary", use_container_width=True)
 
         if apply_cadence:
             st.session_state["settings"] = {
                 "publish_date": publish_date,
+                "publish_end_date": publish_end_date,
                 "start_time": start_time,
                 "end_time": end_time,
                 "count_mode": count_mode,
@@ -4366,6 +4394,7 @@ if active_page != "dashboard" and active_step == 1:
             st.session_state["cadence_posts_range"] = (int(posts_min), int(posts_max))
             st.session_state["_cadence_form_signature"] = (
                 publish_date,
+                publish_end_date,
                 start_time,
                 end_time,
                 count_mode,
@@ -4389,7 +4418,7 @@ if active_page != "dashboard" and active_step == 2:
     )
     current = settings()
     selected_count = len(st.session_state.get("selected_accounts", []))
-    capacity = max_posts_for_window(current["start_time"], current["end_time"], int(current["min_interval"]))
+    capacity = max_posts_for_period(current["publish_date"], current["publish_end_date"], current["start_time"], current["end_time"], int(current["min_interval"]))
     posts_min_required, posts_max_required = planned_total_range(selected_count, int(current["posts_min"]), int(current["posts_max"]))
     if not selected_count:
         render_locked_step(
@@ -4973,7 +5002,7 @@ if active_page != "dashboard" and active_step == 3:
         "Utilise les filtres avant de passer à l'envoi. Failed et erreurs restent visibles ici.",
     )
     current = settings()
-    capacity = max_posts_for_window(current["start_time"], current["end_time"], int(current["min_interval"]))
+    capacity = max_posts_for_period(current["publish_date"], current["publish_end_date"], current["start_time"], current["end_time"], int(current["min_interval"]))
     enough_context = (
         bool(st.session_state.get("grouped_accounts"))
         and int(current["posts_max"]) <= capacity
@@ -5001,6 +5030,7 @@ if active_page != "dashboard" and active_step == 3:
                 selected_posts=st.session_state.get("selected_posts", []),
                 grouped_accounts=st.session_state.get("grouped_accounts", {}),
                 publish_date=current["publish_date"],
+                publish_end_date=current["publish_end_date"],
                 start_time=current["start_time"],
                 end_time=current["end_time"],
                 posts_per_account=int(current["posts_min"]),
