@@ -3554,6 +3554,14 @@ st.markdown(
         font-size: .78rem;
         font-weight: 760;
     }
+    .cadence-add-date-label {
+        height: 1.25rem;
+        color: var(--faint);
+        font-size: .72rem;
+        font-weight: 700;
+        line-height: 1.25rem;
+        text-align: center;
+    }
     .cadence-total-card {
         min-height: 109px;
         box-sizing: border-box;
@@ -4268,7 +4276,7 @@ if active_page != "dashboard" and active_step == 1:
         if st.session_state.get("_cadence_form_signature") != cadence_signature:
             st.session_state["cadence_publish_date"] = current["publish_date"]
             st.session_state["cadence_publish_end_date"] = current["publish_end_date"]
-            st.session_state["cadence_day_mode"] = "2 jours" if current["publish_end_date"] > current["publish_date"] else "1 jour"
+            st.session_state["cadence_show_end_date"] = current["publish_end_date"] > current["publish_date"]
             st.session_state["cadence_start_time"] = current["start_time"]
             st.session_state["cadence_end_time"] = current["end_time"]
             st.session_state["cadence_count_mode"] = current["count_mode"]
@@ -4300,13 +4308,7 @@ if active_page != "dashboard" and active_step == 1:
             f"<div class='cadence-summary-top'><i></i><b>{selected_count} comptes</b> · {selected_group_count} groupes</div></section>",
             unsafe_allow_html=True,
         )
-        day_mode = st.radio(
-            "Durée du planning",
-            ["1 jour", "2 jours"],
-            horizontal=True,
-            key="cadence_day_mode",
-            help="Sur 2 jours, les publications peuvent être réparties entre la première date et la deuxième date.",
-        )
+        st.session_state.setdefault("cadence_show_end_date", current["publish_end_date"] > current["publish_date"])
         count_mode = st.radio(
             "Posts par compte",
             ["Exact", "Range"],
@@ -4316,17 +4318,23 @@ if active_page != "dashboard" and active_step == 1:
         )
         with st.form("cadence_settings_form"):
             st.markdown("<span class='cadence-form-anchor'></span>", unsafe_allow_html=True)
-            date_col, end_date_col, start_col, end_col = st.columns([1, 1, .82, .82])
-            with date_col:
-                publish_date = st.date_input("Date de début", key="cadence_publish_date")
-            with end_date_col:
-                publish_end_date = st.date_input(
-                    "Date de fin",
-                    key="cadence_publish_end_date",
-                    disabled=day_mode == "1 jour",
-                )
-                if day_mode == "1 jour":
+            if st.session_state["cadence_show_end_date"]:
+                date_col, extra_date_col, start_col, end_col = st.columns([1, 1, .56, .56])
+                with date_col:
+                    publish_date = st.date_input("Date de début", key="cadence_publish_date")
+                with extra_date_col:
+                    publish_end_date = st.date_input("Autre date", key="cadence_publish_end_date")
+                    remove_extra_date = st.form_submit_button("−", help="Retirer la date supplémentaire")
+                    add_extra_date = False
+            else:
+                date_col, add_col, start_col, end_col = st.columns([1.15, .18, .56, .56])
+                with date_col:
+                    publish_date = st.date_input("Date", key="cadence_publish_date")
+                with add_col:
+                    st.markdown("<div class='cadence-add-date-label'>Ajouter</div>", unsafe_allow_html=True)
                     publish_end_date = publish_date
+                    add_extra_date = st.form_submit_button("+", help="Ajouter une autre date de publication")
+                    remove_extra_date = False
             with start_col:
                 start_time = st.time_input("Début", key="cadence_start_time")
             with end_col:
@@ -4375,6 +4383,14 @@ if active_page != "dashboard" and active_step == 1:
             same_text_gap = int(current.get("same_text_gap", 60))
             apply_cadence = st.form_submit_button("Appliquer cadence", type="primary", use_container_width=True)
 
+        if add_extra_date:
+            st.session_state["cadence_show_end_date"] = True
+            st.session_state["cadence_publish_end_date"] = publish_date + timedelta(days=1)
+            st.rerun()
+        if remove_extra_date:
+            st.session_state["cadence_show_end_date"] = False
+            st.session_state["cadence_publish_end_date"] = publish_date
+            st.rerun()
         if apply_cadence:
             st.session_state["settings"] = {
                 "publish_date": publish_date,
