@@ -3789,12 +3789,17 @@ if active_page != "dashboard" and active_step == 0:
                         except Exception as e:
                             st.error(str(e))
 
+    # New and existing accounts start active once. Selection remains a separate state.
+    activated_defaults = db.activate_all_accounts_once("v5")
     # The database is the source of truth for active/paused state; session data can be stale after a sync.
     accounts = db.list_accounts()
     st.session_state["threads_accounts"] = accounts
     if not accounts:
         st.info("Aucun compte local. Charge les comptes Postoria d'abord.")
     else:
+        if activated_defaults:
+            for account in accounts:
+                st.session_state[f"account_enabled_{int(account['id'])}"] = True
         st.markdown("#### Choisir les comptes")
         groups = db.list_groups()
         group_color_by_name = {group["name"]: group.get("color") for group in groups}

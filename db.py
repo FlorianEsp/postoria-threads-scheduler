@@ -257,6 +257,11 @@ def init_db() -> None:
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
             """
         )
         _ensure_column(conn, "post_library", "media_ids", "TEXT DEFAULT ''")
@@ -540,6 +545,17 @@ def update_account_preferences(account_id: int, group_name: str, active_for_day:
             "UPDATE accounts SET group_name=?, active_for_day=?, selected_for_schedule=? WHERE id=?",
             (clean_group, int(bool(active_for_day)), int(bool(selected_for_schedule)), int(account_id)),
         )
+
+
+def activate_all_accounts_once(version: str) -> bool:
+    key = f"accounts_active_defaults_{version}"
+    with connect() as conn:
+        completed = conn.execute("SELECT 1 FROM app_state WHERE key=?", (key,)).fetchone()
+        if completed:
+            return False
+        conn.execute("UPDATE accounts SET active_for_day=1")
+        conn.execute("INSERT INTO app_state (key, value) VALUES (?, 'done')", (key,))
+    return True
 
 
 def update_scheduled_media(local_id: int, media_ids: Any, local_photo_asset_ids: Any = None) -> None:
