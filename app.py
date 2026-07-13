@@ -149,8 +149,8 @@ def build_grouped_accounts(accounts: list[dict], edited: pd.DataFrame) -> dict[s
         if row is None:
             continue
         group_name = str(row["group"] or "tous").strip()
-        db.update_account_preferences(int(account["id"]), group_name, bool(row["active"]), bool(row["use"]))
-        if not bool(row["use"]) or not bool(row["active"]):
+        db.update_account_preferences(int(account["id"]), group_name, True, bool(row["use"]))
+        if not bool(row["use"]):
             continue
         grouped.setdefault(group_name, {"accounts": []})
         grouped[group_name]["accounts"].append({**account, "group_name": group_name})
@@ -166,13 +166,13 @@ def restore_account_selection_from_db(accounts: list[dict]) -> None:
     for account in accounts:
         account_id = int(account["id"])
         group_name = account.get("group_name") or "tous"
-        active = bool(account.get("active_for_day", 1))
-        selected = bool(account.get("selected_for_schedule", active))
+        active = True
+        selected = bool(account.get("selected_for_schedule", False))
         account_states.append((account_id, group_name, active, selected))
         st.session_state.setdefault(f"account_group_{account_id}", group_name)
-        st.session_state.setdefault(f"account_status_enabled_v2_{account_id}", active)
-        st.session_state.setdefault(f"account_use_{account_id}", active and selected)
-        if active and selected:
+        st.session_state[f"account_status_enabled_v2_{account_id}"] = True
+        st.session_state.setdefault(f"account_use_{account_id}", selected)
+        if selected:
             selected_groups.add(group_name)
         rows.append(
             {
@@ -190,12 +190,12 @@ def restore_account_selection_from_db(accounts: list[dict]) -> None:
         manual_excluded = [
             account_id
             for account_id, group_name, active, selected in account_states
-            if active and group_name in selected_groups and not selected
+            if group_name in selected_groups and not selected
         ]
         manual_included = [
             account_id
             for account_id, group_name, active, selected in account_states
-            if active and selected and group_name not in selected_groups
+            if selected and group_name not in selected_groups
         ]
         st.session_state.setdefault("manual_excluded_accounts", sorted(manual_excluded))
         st.session_state.setdefault("manual_included_accounts", sorted(manual_included))
@@ -1983,7 +1983,7 @@ st.markdown(
     }
     .account-table-head {
         display: grid;
-        grid-template-columns: 44px 2.2fr 1.1fr 1fr .9fr 1fr;
+        grid-template-columns: 44px 2.2fr 1.1fr 1fr 44px;
         gap: 16px;
         align-items: center;
         padding: 16px 20px;
@@ -3634,7 +3634,7 @@ st.markdown(
         background: #18181b !important;
     }
     .account-table-head {
-        grid-template-columns: 44px minmax(260px, 2.25fr) minmax(120px, .9fr) minmax(105px, .78fr) 64px 44px;
+        grid-template-columns: 44px minmax(260px, 2.25fr) minmax(120px, .9fr) minmax(105px, .78fr) 44px;
         min-height: 50px;
         padding: 10px 18px;
         letter-spacing: .1em;
@@ -3961,7 +3961,7 @@ if active_page != "dashboard" and active_step == 0:
 
         group_action_a, group_action_b, group_action_c = st.columns([1.2, 1, 2.4])
         with group_action_a:
-            all_active = st.button("Sélectionner tous les actifs", use_container_width=True)
+            all_active = st.button("Sélectionner tous les comptes", use_container_width=True)
         with group_action_b:
             create_group = st.button("+ Créer un groupe", use_container_width=True)
         with group_action_c:
@@ -3973,7 +3973,7 @@ if active_page != "dashboard" and active_step == 0:
             st.session_state.pop("_account_group_signature", None)
             for account in accounts:
                 account_id = int(account["id"])
-                st.session_state[f"account_use_{account_id}"] = bool(account.get("active_for_day", 1))
+                st.session_state[f"account_use_{account_id}"] = True
             st.rerun()
         if create_group:
             st.session_state["show_group_dialog"] = True
@@ -3989,8 +3989,7 @@ if active_page != "dashboard" and active_step == 0:
             for account in accounts:
                 account_id = int(account["id"])
                 group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
-                active = bool(st.session_state.get(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1))))
-                base_use = active and group_name in selected_group_filters
+                base_use = group_name in selected_group_filters
                 if account_id in manual_excluded:
                     st.session_state[f"account_use_{account_id}"] = False
                 elif account_id in manual_included:
@@ -4038,61 +4037,35 @@ if active_page != "dashboard" and active_step == 0:
         for account in accounts:
             account_id = int(account["id"])
             st.session_state.setdefault(f"account_group_{account_id}", account.get("group_name") or "tous")
-            st.session_state.setdefault(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1)))
             st.session_state.setdefault(f"account_use_{account_id}", False)
 
-        top_a, top_b, top_c, top_d = st.columns([1.15, 1.15, .95, .55])
+        top_a, top_d = st.columns([3.2, .55])
         with top_a:
             account_query = st.text_input("Search accounts", placeholder="Search accounts...", label_visibility="collapsed")
-        with top_b:
-            status_filter = st.radio(
-                "Statut comptes",
-                ["All", "Active", "Paused", "Rate limited"],
-                horizontal=True,
-                label_visibility="collapsed",
-            )
-        with top_c:
-            activate_visible = st.button("Activer les comptes visibles", key="activate_visible_accounts")
         visible_accounts = []
         query = account_query.strip().lower()
         for account in accounts:
             account_id = int(account["id"])
             group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
-            active = bool(st.session_state.get(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1))))
-            enriched = {**account, "group_name": group_name, "active_for_day": int(active)}
-            status = account_status_label(enriched)
+            enriched = {**account, "group_name": group_name, "active_for_day": 1}
             label_text = f"{account.get('name','')} {account.get('username','')} {group_name}".lower()
             if query and query not in label_text:
-                continue
-            if status_filter != "All" and status != status_filter:
                 continue
             visible_accounts.append(enriched)
         with top_d:
             st.markdown(f"<div class='accounts-count'>{len(visible_accounts)} of {len(accounts)}</div>", unsafe_allow_html=True)
-        if activate_visible:
-            for account in visible_accounts:
-                account_id = int(account["id"])
-                group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
-                selected = bool(st.session_state.get(f"account_use_{account_id}", False))
-                db.update_account_preferences(account_id, group_name, True, selected)
-                st.session_state[f"account_status_enabled_v2_{account_id}"] = True
-            st.rerun()
-
         selected_total = sum(
             1 for account in accounts
             if st.session_state.get(f"account_use_{int(account['id'])}", False)
-            and st.session_state.get(f"account_status_enabled_v2_{int(account['id'])}", True)
         )
         selected_visible = sum(
             1 for account in visible_accounts
             if st.session_state.get(f"account_use_{int(account['id'])}", False)
-            and st.session_state.get(f"account_status_enabled_v2_{int(account['id'])}", True)
         )
-        paused_visible = sum(1 for account in visible_accounts if not st.session_state.get(f"account_status_enabled_v2_{int(account['id'])}", True))
         st.markdown(
             "<div class='accounts-selection-line'>"
             f"<strong>{selected_total} comptes sélectionnés</strong>"
-            f"<span>{selected_visible}/{len(visible_accounts)} dans cette vue · {paused_visible} en pause</span>"
+            f"<span>{selected_visible}/{len(visible_accounts)} dans cette vue</span>"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -4100,7 +4073,6 @@ if active_page != "dashboard" and active_step == 0:
         selected_accounts_preview = [
             account for account in accounts
             if st.session_state.get(f"account_use_{int(account['id'])}", False)
-            and st.session_state.get(f"account_status_enabled_v2_{int(account['id'])}", True)
         ]
         with st.expander(f"Comptes sélectionnés ({len(selected_accounts_preview)})", expanded=False):
             header_left, header_right = st.columns([2, 1])
@@ -4160,7 +4132,7 @@ if active_page != "dashboard" and active_step == 0:
         st.markdown(
             "<div class='accounts-shell-lite'>"
             "<div class='account-table-head'>"
-            "<span></span><span>COMPTE</span><span>GROUPE</span><span>PROCHAIN POST</span><span>ACTIF</span><span></span>"
+            "<span></span><span>COMPTE</span><span>GROUPE</span><span>PROCHAIN POST</span><span></span>"
             "</div>"
             "</div>",
             unsafe_allow_html=True,
@@ -4170,7 +4142,7 @@ if active_page != "dashboard" and active_step == 0:
         if not visible_accounts:
             render_locked_step(
                 "Aucun compte trouvé avec ces filtres.",
-                ["Change la recherche, le filtre de statut, ou sélectionne un autre groupe."],
+                ["Change la recherche ou sélectionne un autre groupe."],
             )
 
         rows = []
@@ -4178,19 +4150,13 @@ if active_page != "dashboard" and active_step == 0:
         manual_excluded = set(st.session_state.get("manual_excluded_accounts", []))
         for row_index, account in enumerate(visible_accounts):
             account_id = int(account["id"])
-            account_is_active = bool(
-                st.session_state.get(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1)))
-            )
-            if not account_is_active:
-                st.session_state[f"account_use_{account_id}"] = False
             if row_index:
                 st.markdown("<div class='account-row-divider'></div>", unsafe_allow_html=True)
-            row_cols = st.columns([.32, 2.25, .9, .78, .5, .3])
+            row_cols = st.columns([.32, 2.25, .9, .78, .3])
             with row_cols[0]:
                 use_account = st.checkbox(
                     "Utiliser",
                     key=f"account_use_{account_id}",
-                    disabled=not account_is_active,
                     label_visibility="collapsed",
                 )
             with row_cols[1]:
@@ -4230,25 +4196,17 @@ if active_page != "dashboard" and active_step == 0:
                     f"<span class='next-post-pill'>{h(next_by_account.get(account_id, '-'))}</span>",
                     unsafe_allow_html=True,
                 )
+            base_use = selected_group in st.session_state.get("selected_group_filters", [])
+            if bool(use_account) == base_use:
+                manual_included.discard(account_id)
+                manual_excluded.discard(account_id)
+            elif bool(use_account):
+                manual_included.add(account_id)
+                manual_excluded.discard(account_id)
+            else:
+                manual_excluded.add(account_id)
+                manual_included.discard(account_id)
             with row_cols[4]:
-                active_account = st.toggle(
-                    f"Compte actif {account_id}",
-                    key=f"account_status_enabled_v2_{account_id}",
-                    label_visibility="collapsed",
-                )
-                if not active_account:
-                    use_account = False
-                base_use = active_account and selected_group in st.session_state.get("selected_group_filters", [])
-                if bool(use_account) == base_use:
-                    manual_included.discard(account_id)
-                    manual_excluded.discard(account_id)
-                elif bool(use_account):
-                    manual_included.add(account_id)
-                    manual_excluded.discard(account_id)
-                else:
-                    manual_excluded.add(account_id)
-                    manual_included.discard(account_id)
-            with row_cols[5]:
                 account_url = account_threads_url(account) or account.get("url")
                 action_link = (
                     f"<a href='{h(account_url)}' target='_blank' rel='noreferrer' title='Ouvrir ce compte dans Threads' aria-label='Ouvrir ce compte dans Threads'>&nearr;</a>"
@@ -4262,7 +4220,7 @@ if active_page != "dashboard" and active_step == 0:
                     "id": account_id,
                     "compte": account_label(account),
                     "group": selected_group,
-                    "active": bool(active_account),
+                    "active": True,
                     "url": account.get("url", ""),
                 }
             )
@@ -4280,7 +4238,7 @@ if active_page != "dashboard" and active_step == 0:
                     "id": account_id,
                     "compte": account_label(account),
                     "group": st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous"),
-                    "active": bool(st.session_state.get(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1)))),
+                    "active": True,
                     "url": account.get("url", ""),
                 }
             )
@@ -4425,7 +4383,7 @@ if active_page != "dashboard" and active_step == 1:
             # Hidden from this compact screen, but preserved for existing plans.
             avoid_same_text = bool(current.get("avoid_same_text", False))
             same_text_gap = int(current.get("same_text_gap", 60))
-            apply_cadence = st.form_submit_button("Appliquer cadence", type="primary", use_container_width=True)
+            apply_cadence = st.form_submit_button("Continuer vers Posts", type="primary", use_container_width=True)
 
         if add_extra_date:
             st.session_state["cadence_show_end_date"] = True
@@ -4466,15 +4424,17 @@ if active_page != "dashboard" and active_step == 1:
                 caption_mode,
             )
             clear_preview_draft("Preview brouillon supprimée: cadence changée. Les posts déjà planifiés restent conservés.")
-            st.success("Cadence appliquée.")
+            st.session_state["active_step"] = 2
+            st.session_state["app_page"] = "posts"
+            st.rerun()
         st.info(distribution_sentence(settings()))
 
 if active_page != "dashboard" and active_step == 2:
-    st.subheader("Posts")
+    st.subheader("Bibliothèque de posts")
     section_intro(
         "Étape 3",
-        "Ajoute puis sélectionne les textes. Une photo peut ensuite être attachée au post choisi.",
-        "Les médias utilisent des media IDs déjà disponibles. Les replies sont préparées en preview.",
+        "Importe un CSV, travaille son dernier lot, puis choisis les textes qui iront dans la prochaine preview.",
+        "Tu peux créer, modifier, désactiver ou enlever des posts localement. Rien ici ne supprime un post déjà envoyé.",
     )
     current = settings()
     selected_count = len(st.session_state.get("selected_accounts", []))
@@ -4644,7 +4604,7 @@ if active_page != "dashboard" and active_step == 2:
                         st.session_state.pop("selected_photo_asset_id", None)
                         st.rerun()
 
-        st.markdown("#### Posts")
+        st.markdown("### Bibliothèque")
         import_col, manual_col = st.columns(2)
         with import_col:
             uploaded_files = st.file_uploader(
@@ -4671,6 +4631,7 @@ if active_page != "dashboard" and active_step == 2:
                 allow_reimport = st.checkbox("Autoriser le réimport des CSV déjà enregistrés", key="allow_reimport_csv_files")
                 if st.button("Importer les CSV", disabled=not prepared_files, use_container_width=True):
                     all_imported_ids: set[int] = set()
+                    latest_batch_id = ""
                     summaries = []
                     for uploaded, csv_bytes, csv_hash, exists in prepared_files:
                         if exists and not allow_reimport:
@@ -4679,7 +4640,7 @@ if active_page != "dashboard" and active_step == 2:
                         frame = pd.read_csv(io.BytesIO(csv_bytes))
                         records = make_post_records(frame)
                         added, skipped, imported_ids = db.add_posts_with_ids(records)
-                        db.record_post_import_batch(
+                        latest_batch_id = db.record_post_import_batch(
                             uploaded.name,
                             csv_hash,
                             len(csv_bytes),
@@ -4689,18 +4650,23 @@ if active_page != "dashboard" and active_step == 2:
                         )
                         all_imported_ids.update(int(post_id) for post_id in imported_ids)
                         summaries.append(f"{uploaded.name}: {added} nouveaux, {skipped} doublons/vides, {len(set(imported_ids))} liés")
-                    if all_imported_ids:
+                    if latest_batch_id:
+                        latest_imported_ids = set(db.post_ids_for_import_batch(latest_batch_id))
                         imported_posts = [
                             post for post in db.list_posts(active_only=False)
-                            if int(post["id"]) in all_imported_ids
+                            if int(post["id"]) in latest_imported_ids
                         ]
                         st.session_state["selected_posts"] = imported_posts
                         st.session_state["posts_selection_explicit"] = True
-                        st.session_state["_selected_posts_signature"] = tuple(sorted(all_imported_ids))
+                        st.session_state["_selected_posts_signature"] = tuple(sorted(latest_imported_ids))
+                        st.session_state["post_import_batch_filter"] = latest_batch_id
                         st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
                         if clear_preview_draft("Preview brouillon supprimée: nouveaux CSV importés. Les posts déjà planifiés restent conservés."):
                             st.info("Ancienne preview supprimée. Les posts déjà planifiés restent conservés.")
-                    st.success("Import terminé. " + " | ".join(summaries[:4]))
+                    st.success(
+                        "Import terminé. Le dernier CSV importé est maintenant affiché et ses posts sont sélectionnés. "
+                        + " | ".join(summaries[:4])
+                    )
                     if len(summaries) > 4:
                         st.caption("Autres fichiers: " + " | ".join(summaries[4:]))
                     posts = db.list_posts(active_only=False)
@@ -4962,7 +4928,7 @@ if active_page != "dashboard" and active_step == 2:
                         "use": st.column_config.CheckboxColumn("Publier", help="Inclus dans la prochaine preview."),
                         "active": st.column_config.CheckboxColumn("Actif", help="Désactive le post dans la bibliothèque."),
                         "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
-                        "caption": st.column_config.TextColumn("Texte", disabled=True, width="large"),
+                        "caption": st.column_config.TextColumn("Texte", width="large"),
                         "media_ids": st.column_config.TextColumn("Media IDs", width="medium"),
                         "media_folder": st.column_config.TextColumn("Dossier", disabled=True, width="small"),
                         "variables": st.column_config.TextColumn("Variables", width="medium"),
@@ -4970,7 +4936,7 @@ if active_page != "dashboard" and active_step == 2:
                         "photo_note": st.column_config.TextColumn("Note photo", width="medium"),
                         "used": st.column_config.NumberColumn("Usages", disabled=True, width="small"),
                     },
-                    disabled=["id", "caption", "media_folder", "used"],
+                    disabled=["id", "media_folder", "used"],
                     key=f"posts_editor_{st.session_state.get('posts_editor_version', 0)}",
                 )
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -5004,7 +4970,10 @@ if active_page != "dashboard" and active_step == 2:
 
             if apply_posts or save_posts:
                 if save_posts:
+                    caption_errors = 0
                     for _, row in edited_posts.iterrows():
+                        if not db.update_post_caption(int(row["id"]), str(row.get("caption", ""))):
+                            caption_errors += 1
                         db.update_post_metadata(
                             int(row["id"]),
                             row["media_ids"],
@@ -5016,6 +4985,8 @@ if active_page != "dashboard" and active_step == 2:
                         )
                     posts = db.list_posts(active_only=False)
                     st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                    if caption_errors:
+                        st.warning(f"{caption_errors} texte(s) non modifiés: vide ou déjà présent dans la bibliothèque.")
 
                 post_by_id = {int(p["id"]): p for p in db.list_posts(active_only=False)}
                 selected_posts = []

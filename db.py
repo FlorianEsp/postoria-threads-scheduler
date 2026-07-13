@@ -491,6 +491,26 @@ def update_post_metadata(
         )
 
 
+def update_post_caption(post_id: int, caption: str) -> bool:
+    """Update a library post while preserving the unique-caption constraint."""
+    clean_caption = str(caption or "").strip()
+    if not clean_caption:
+        return False
+    clean_hash = caption_hash(clean_caption)
+    with connect() as conn:
+        duplicate = conn.execute(
+            "SELECT id FROM post_library WHERE caption_hash=? AND id<>?",
+            (clean_hash, int(post_id)),
+        ).fetchone()
+        if duplicate:
+            return False
+        conn.execute(
+            "UPDATE post_library SET caption=?, caption_hash=? WHERE id=?",
+            (clean_caption, clean_hash, int(post_id)),
+        )
+    return True
+
+
 def list_posts(active_only: bool = True) -> list[dict[str, Any]]:
     query = """
         SELECT p.*,
