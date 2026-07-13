@@ -1163,6 +1163,31 @@ def render_flow_status(
     return active_step
 
 
+def render_step_links(active_step: int) -> None:
+    """Compact in-app links between the scheduler steps."""
+    steps = [
+        ("accounts", "Comptes"),
+        ("cadence", "Cadence"),
+        ("posts", "Posts"),
+        ("preview", "Preview"),
+        ("analytics", "Analytics"),
+        ("send", "Envoi"),
+        ("tracking", "Suivi"),
+    ]
+    cols = st.columns(len(steps))
+    for index, (page_key, label) in enumerate(steps):
+        with cols[index]:
+            if st.button(
+                label,
+                key=f"step_link_{page_key}",
+                type="primary" if index == active_step else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state["app_page"] = page_key
+                st.session_state["active_step"] = index
+                st.rerun()
+
+
 def render_app_header(api_exists: bool, dry_run: bool, app_tz: str) -> None:
     api_state = "API détectée" if api_exists else "API manquante"
     run_state = "Dry-run actif" if dry_run else "Envoi réel armé"
@@ -3820,7 +3845,12 @@ if api_exists:
     except Exception as e:
         st.error(str(e))
 
+# Apply the one-time default before restoring session selection/status widgets.
+activated_account_defaults = db.activate_all_accounts_once("v7")
 stored_accounts = db.list_accounts()
+if activated_account_defaults:
+    for account in stored_accounts:
+        st.session_state[f"account_status_enabled_v2_{int(account['id'])}"] = True
 restore_account_selection_from_db(stored_accounts)
 posts = db.list_posts(active_only=False)
 preview = db.list_scheduled("preview")
@@ -3858,6 +3888,8 @@ active_step = page_to_step.get(active_page, int(st.session_state.get("active_ste
 st.session_state["active_step"] = active_step
 
 render_app_header(api_exists, dry_run, APP_TZ)
+if active_page != "dashboard":
+    render_step_links(active_step)
 if st.session_state.get("reset_dialog_mode"):
     render_reset_dialog(str(st.session_state["reset_dialog_mode"]))
 if st.session_state.get("preview_cleared_notice"):
@@ -3906,14 +3938,13 @@ if active_page != "dashboard" and active_step == 0:
                             st.error(str(e))
 
     # New and existing accounts start active once. Selection remains a separate state.
-    activated_defaults = db.activate_all_accounts_once("v6")
     # The database is the source of truth for active/paused state; session data can be stale after a sync.
     accounts = db.list_accounts()
     st.session_state["threads_accounts"] = accounts
     if not accounts:
         st.info("Aucun compte local. Charge les comptes Postoria d'abord.")
     else:
-        if activated_defaults:
+        if activated_account_defaults:
             for account in accounts:
                 st.session_state[f"account_status_enabled_v2_{int(account['id'])}"] = True
         st.markdown("#### Choisir les comptes")
@@ -4108,6 +4139,19 @@ if active_page != "dashboard" and active_step == 0:
                 st.caption("Prends au moins un groupe ou sélectionne des comptes avant de continuer.")
         with continue_right:
             if st.button("Continuer vers Cadence", type="primary", disabled=not selected_accounts_preview):
+                # Build the exact selection now: rerunning before the table's final
+                # persistence pass previously left Cadence with an older one-account list.
+                continuation_groups: dict[str, dict] = {}
+                continuation_accounts: list[dict] = []
+                for account in selected_accounts_preview:
+                    account_id = int(account["id"])
+                    group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
+                    selected_account = {**account, "group_name": group_name, "active_for_day": 1}
+                    continuation_groups.setdefault(group_name, {"accounts": []})["accounts"].append(selected_account)
+                    continuation_accounts.append(selected_account)
+                    db.update_account_preferences(account_id, group_name, True, True)
+                st.session_state["grouped_accounts"] = continuation_groups
+                st.session_state["selected_accounts"] = continuation_accounts
                 st.session_state["account_step_done"] = True
                 st.session_state["active_step"] = 1
                 st.session_state["app_page"] = "cadence"
