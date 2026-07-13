@@ -3453,14 +3453,14 @@ st.markdown(
         background: #18181b !important;
     }
     .account-table-head {
-        grid-template-columns: 44px 2.2fr 1.1fr 1fr .9fr .9fr;
+        grid-template-columns: 44px 2.05fr .82fr 1.02fr .9fr .56fr .5fr;
         min-height: 54px;
         padding: 12px 18px;
         letter-spacing: .1em;
     }
     div[data-testid="stHorizontalBlock"]:has(.account-person) {
         align-items: center !important;
-        min-height: 76px;
+        min-height: 68px;
         margin: 0 !important;
         padding: 4px 18px;
         border-right: 1px solid var(--line);
@@ -3474,20 +3474,30 @@ st.markdown(
     div[data-testid="stHorizontalBlock"]:has(.account-person) > div {
         min-width: 0;
     }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+    }
     div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stCheckbox"] {
         display: flex;
         align-items: center;
         justify-content: center;
     }
-    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stRadio"] {
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stSelectbox"] {
         margin: 0 !important;
     }
-    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stRadio"] [role="radiogroup"] {
-        gap: 4px;
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stSelectbox"] [data-baseweb="select"] > div {
+        min-height: 34px !important;
+        border-radius: 7px !important;
+        font-size: .76rem !important;
     }
-    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stRadio"] label {
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stToggle"] {
+        display: flex;
+        justify-content: center;
         margin: 0 !important;
-        font-size: .72rem !important;
+    }
+    .account-note {
+        color: var(--faint);
+        font-size: .78rem;
     }
     .account-row-divider {display: none;}
     .account-person {
@@ -3771,10 +3781,6 @@ if active_page != "dashboard" and active_step == 0:
             account_id = int(account["id"])
             st.session_state.setdefault(f"account_group_{account_id}", account.get("group_name") or "tous")
             st.session_state.setdefault(f"account_active_{account_id}", bool(account.get("active_for_day", 1)))
-            st.session_state.setdefault(
-                f"account_status_{account_id}",
-                "Active" if bool(st.session_state.get(f"account_active_{account_id}", True)) else "Paused",
-            )
             st.session_state.setdefault(f"account_use_{account_id}", False)
 
         top_a, top_b, top_c = st.columns([1.15, 1.15, .65])
@@ -3862,7 +3868,7 @@ if active_page != "dashboard" and active_step == 0:
         st.markdown(
             "<div class='accounts-shell-lite'>"
             "<div class='account-table-head'>"
-            "<span></span><span>COMPTE</span><span>GROUPE</span><span>PROCHAIN POST</span><span>STATUT</span><span>ACTIONS</span>"
+            "<span></span><span>COMPTE</span><span>NOTES</span><span>GROUPE</span><span>PROCHAIN POST</span><span>STATUT</span><span>ACTIONS</span>"
             "</div>"
             "</div>",
             unsafe_allow_html=True,
@@ -3882,7 +3888,7 @@ if active_page != "dashboard" and active_step == 0:
             account_id = int(account["id"])
             if row_index:
                 st.markdown("<div class='account-row-divider'></div>", unsafe_allow_html=True)
-            row_cols = st.columns([.38, 2.2, 1.15, .9, .95, .9])
+            row_cols = st.columns([.32, 2.05, .82, 1.02, .9, .56, .5])
             with row_cols[0]:
                 use_account = st.checkbox("Utiliser", key=f"account_use_{account_id}", label_visibility="collapsed")
             with row_cols[1]:
@@ -3904,41 +3910,30 @@ if active_page != "dashboard" and active_step == 0:
                     unsafe_allow_html=True,
                 )
             with row_cols[2]:
+                st.markdown("<span class='account-note'>-</span>", unsafe_allow_html=True)
+            with row_cols[3]:
                 group_index = 0
                 current_group = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
                 if current_group in group_options:
                     group_index = group_options.index(current_group)
-                selected_group = choose_option(
+                selected_group = st.selectbox(
                     f"Groupe {account_id}",
                     group_options,
                     index=group_index,
                     key=f"account_group_{account_id}",
-                    horizontal=len(group_options) <= 3,
                     label_visibility="collapsed",
                 )
-                st.markdown(
-                    render_group_badge(selected_group, group_color_by_name.get(selected_group)),
-                    unsafe_allow_html=True,
-                )
-            with row_cols[3]:
+            with row_cols[4]:
                 st.markdown(
                     f"<span class='next-post-pill'>{h(next_by_account.get(account_id, '-'))}</span>",
                     unsafe_allow_html=True,
                 )
-            with row_cols[4]:
-                active_before = bool(st.session_state.get(f"account_active_{account_id}", bool(account.get("active_for_day", 1))))
-                status_choice = choose_option(
-                    f"Statut {account_id}",
-                    ["Active", "Paused"],
-                    index=0 if active_before else 1,
-                    key=f"account_status_{account_id}",
-                    horizontal=True,
+            with row_cols[5]:
+                active_account = st.toggle(
+                    f"Compte actif {account_id}",
+                    key=f"account_active_{account_id}",
                     label_visibility="collapsed",
                 )
-                active_account = status_choice == "Active"
-                st.session_state[f"account_active_{account_id}"] = active_account
-                status_text = account_status_label({**account, "group_name": selected_group, "active_for_day": int(active_account)})
-                st.markdown(f"<span class='status-text'>{h(status_text)}</span>", unsafe_allow_html=True)
                 base_use = active_account and selected_group in st.session_state.get("selected_group_filters", [])
                 if bool(use_account) == base_use:
                     manual_included.discard(account_id)
@@ -3949,7 +3944,7 @@ if active_page != "dashboard" and active_step == 0:
                 else:
                     manual_excluded.add(account_id)
                     manual_included.discard(account_id)
-            with row_cols[5]:
+            with row_cols[6]:
                 account_url = account_threads_url(account) or account.get("url")
                 action_link = (
                     f"<a href='{h(account_url)}' target='_blank' rel='noreferrer'>Threads</a>"
