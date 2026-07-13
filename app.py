@@ -1502,17 +1502,28 @@ def clear_preview_draft(reason: str | None = None) -> bool:
 
 
 def render_group_form(form_key: str, close_on_save: bool = False) -> None:
+    st.markdown(
+        "<div class='group-form-intro'><strong>Nouveau groupe</strong>"
+        "<span>Donne-lui un nom et une couleur. Tu pourras ensuite y classer tes comptes depuis le tableau.</span></div>",
+        unsafe_allow_html=True,
+    )
     name = st.text_input("Nom du groupe", placeholder="ex: w-u, tous, group 5 post", key=f"{form_key}_name")
     color_labels = [label for label, _, _ in GROUP_COLOR_CHOICES]
-    color_label = st.radio("Couleur", color_labels, horizontal=True, key=f"{form_key}_color_label")
+    color_state_key = f"{form_key}_color_label"
+    st.session_state.setdefault(color_state_key, color_labels[0])
+    st.markdown("<div class='group-colour-label'>Couleur</div>", unsafe_allow_html=True)
+    color_cols = st.columns(len(color_labels))
+    for index, label in enumerate(color_labels):
+        dot = next(dot for choice, dot, _ in GROUP_COLOR_CHOICES if choice == label)
+        selected = st.session_state[color_state_key] == label
+        with color_cols[index]:
+            if st.button(label, key=f"{form_key}_colour_{index}", type="primary" if selected else "secondary"):
+                st.session_state[color_state_key] = label
+                st.rerun()
+    color_label = st.session_state[color_state_key]
     color = next(dot for label, dot, _ in GROUP_COLOR_CHOICES if label == color_label)
     st.markdown(
-        "<div class='group-color-preview'>"
-        + "".join(
-            f"<span style='background:{dot}; opacity:{'1' if dot == color else '.28'}'></span>"
-            for _, dot, _ in GROUP_COLOR_CHOICES
-        )
-        + "</div>",
+        f"<div class='group-colour-preview'><i style='background:{color}'></i><span>{h(color_label)}</span></div>",
         unsafe_allow_html=True,
     )
     if st.button("Créer le groupe", disabled=not name.strip(), key=f"{form_key}_save"):
@@ -3430,6 +3441,37 @@ st.markdown(
     .accounts-group-chip.is-selected {color: var(--text);}
     .accounts-group-chip.is-selected b {color: var(--accent);}
     .accounts-group-empty {color: var(--muted); font-size: .84rem;}
+    .group-form-intro {
+        display: grid;
+        gap: 5px;
+        margin: 0 0 18px;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(244, 63, 94, .055);
+    }
+    .group-form-intro strong {color: var(--text); font-size: .96rem;}
+    .group-form-intro span {color: var(--muted); font-size: .8rem; line-height: 1.45;}
+    .group-colour-label {
+        margin: 14px 0 7px;
+        color: var(--muted);
+        font-size: .78rem;
+        font-weight: 720;
+    }
+    .group-colour-preview {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin: 10px 0 16px;
+        color: var(--muted);
+        font-size: .78rem;
+    }
+    .group-colour-preview i {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        box-shadow: 0 0 0 4px rgba(255,255,255,.04);
+    }
     .accounts-selection-line {
         display: flex;
         justify-content: space-between;
@@ -3506,21 +3548,23 @@ st.markdown(
     div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] {
         margin: 0 !important;
     }
-    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] > button {
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] button {
         width: auto !important;
-        min-height: 32px !important;
-        padding: 5px 9px !important;
+        max-width: 104px !important;
+        min-height: 28px !important;
+        padding: 3px 8px !important;
         border-radius: 7px !important;
         background: rgba(223, 77, 110, .10) !important;
         border-color: rgba(223, 77, 110, .24) !important;
         color: #f7c6d2 !important;
-        font-size: .76rem !important;
+        font-size: .72rem !important;
         white-space: nowrap !important;
     }
-    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] > button p {
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] button p {
         width: auto !important;
         font-weight: 720 !important;
-    }
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
     }
     .account-row-divider {display: none;}
     .account-person {
@@ -3545,8 +3589,8 @@ st.markdown(
     .account-actions a {
         display: inline-grid;
         place-items: center;
-        width: 30px;
-        height: 30px;
+        width: 28px;
+        height: 28px;
         padding: 0;
         border: 1px solid var(--line);
         border-radius: 7px;
@@ -3554,6 +3598,12 @@ st.markdown(
         font-size: 1rem;
         line-height: 1;
         text-decoration: none;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) .account-actions {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 28px;
     }
     .account-actions a:hover {
         color: var(--text);
@@ -3729,6 +3779,20 @@ if active_page != "dashboard" and active_step == 0:
     if not accounts:
         st.info("Aucun compte local. Charge les comptes Postoria d'abord.")
     else:
+        # Existing local accounts used to be imported as paused. Make all accounts active once,
+        # while keeping the user's current scheduling selection unchanged.
+        if db.get_app_state("accounts_active_by_default_v1") != "done":
+            refreshed_accounts = []
+            for account in accounts:
+                account_id = int(account["id"])
+                group_name = account.get("group_name") or "tous"
+                selected = bool(account.get("selected_for_schedule", False))
+                db.update_account_preferences(account_id, group_name, True, selected)
+                st.session_state[f"account_active_{account_id}"] = True
+                refreshed_accounts.append({**account, "active_for_day": 1})
+            accounts = refreshed_accounts
+            st.session_state["threads_accounts"] = accounts
+            db.set_app_state("accounts_active_by_default_v1", "done")
         st.markdown("#### Choisir les comptes")
         groups = db.list_groups()
         group_color_by_name = {group["name"]: group.get("color") for group in groups}
