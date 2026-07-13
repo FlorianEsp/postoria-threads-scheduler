@@ -3795,7 +3795,7 @@ if active_page != "dashboard" and active_step == 0:
     else:
         # Existing local accounts used to be imported as paused. Make all accounts active once,
         # while keeping the user's current scheduling selection unchanged.
-        if db.get_app_state("accounts_active_by_default_v1") != "done":
+        if db.get_app_state("accounts_active_by_default_v2") != "done":
             refreshed_accounts = []
             for account in accounts:
                 account_id = int(account["id"])
@@ -3806,7 +3806,7 @@ if active_page != "dashboard" and active_step == 0:
                 refreshed_accounts.append({**account, "active_for_day": 1})
             accounts = refreshed_accounts
             st.session_state["threads_accounts"] = accounts
-            db.set_app_state("accounts_active_by_default_v1", "done")
+            db.set_app_state("accounts_active_by_default_v2", "done")
         st.markdown("#### Choisir les comptes")
         groups = db.list_groups()
         group_color_by_name = {group["name"]: group.get("color") for group in groups}
@@ -3928,8 +3928,16 @@ if active_page != "dashboard" and active_step == 0:
         with top_c:
             st.markdown(f"<div class='accounts-count'>{len(visible_accounts)} of {len(accounts)}</div>", unsafe_allow_html=True)
 
-        selected_total = sum(1 for account in accounts if st.session_state.get(f"account_use_{int(account['id'])}", False))
-        selected_visible = sum(1 for account in visible_accounts if st.session_state.get(f"account_use_{int(account['id'])}", False))
+        selected_total = sum(
+            1 for account in accounts
+            if st.session_state.get(f"account_use_{int(account['id'])}", False)
+            and st.session_state.get(f"account_active_{int(account['id'])}", True)
+        )
+        selected_visible = sum(
+            1 for account in visible_accounts
+            if st.session_state.get(f"account_use_{int(account['id'])}", False)
+            and st.session_state.get(f"account_active_{int(account['id'])}", True)
+        )
         paused_visible = sum(1 for account in visible_accounts if not st.session_state.get(f"account_active_{int(account['id'])}", True))
         st.markdown(
             "<div class='accounts-selection-line'>"
@@ -3942,6 +3950,7 @@ if active_page != "dashboard" and active_step == 0:
         selected_accounts_preview = [
             account for account in accounts
             if st.session_state.get(f"account_use_{int(account['id'])}", False)
+            and st.session_state.get(f"account_active_{int(account['id'])}", True)
         ]
         with st.expander(f"Comptes sélectionnés ({len(selected_accounts_preview)})", expanded=False):
             header_left, header_right = st.columns([2, 1])
@@ -4004,11 +4013,21 @@ if active_page != "dashboard" and active_step == 0:
         manual_excluded = set(st.session_state.get("manual_excluded_accounts", []))
         for row_index, account in enumerate(visible_accounts):
             account_id = int(account["id"])
+            account_is_active = bool(
+                st.session_state.get(f"account_active_{account_id}", bool(account.get("active_for_day", 1)))
+            )
+            if not account_is_active:
+                st.session_state[f"account_use_{account_id}"] = False
             if row_index:
                 st.markdown("<div class='account-row-divider'></div>", unsafe_allow_html=True)
             row_cols = st.columns([.32, 2.25, .9, .78, .5, .3])
             with row_cols[0]:
-                use_account = st.checkbox("Utiliser", key=f"account_use_{account_id}", label_visibility="collapsed")
+                use_account = st.checkbox(
+                    "Utiliser",
+                    key=f"account_use_{account_id}",
+                    disabled=not account_is_active,
+                    label_visibility="collapsed",
+                )
             with row_cols[1]:
                 avatar_url = account.get("avatar_url")
                 display_name = account.get("name") or account_label(account)
@@ -4056,6 +4075,8 @@ if active_page != "dashboard" and active_step == 0:
                     key=f"account_active_{account_id}",
                     label_visibility="collapsed",
                 )
+                if not active_account:
+                    use_account = False
                 base_use = active_account and selected_group in st.session_state.get("selected_group_filters", [])
                 if bool(use_account) == base_use:
                     manual_included.discard(account_id)
