@@ -3521,6 +3521,13 @@ st.markdown(
     div[data-testid="stHorizontalBlock"]:has(.account-person) > div {
         min-width: 0;
     }
+    /* Columns use Streamlit border wrappers internally. They must stay invisible in this dense table. */
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stVerticalBlockBorderWrapper"] {
+        border: 0 !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
     div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stVerticalBlock"] {
         gap: 0 !important;
     }
@@ -3550,15 +3557,22 @@ st.markdown(
     }
     div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] button {
         width: auto !important;
-        max-width: 104px !important;
-        min-height: 28px !important;
-        padding: 3px 8px !important;
+        max-width: 92px !important;
+        min-height: 26px !important;
+        padding: 2px 7px !important;
         border-radius: 7px !important;
         background: rgba(223, 77, 110, .10) !important;
         border-color: rgba(223, 77, 110, .24) !important;
         color: #f7c6d2 !important;
         font-size: .72rem !important;
         white-space: nowrap !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] [data-testid="baseButton-secondary"],
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] [data-testid="baseButton-primary"] {
+        width: auto !important;
+        min-height: 26px !important;
+        padding: 2px 7px !important;
+        border-radius: 7px !important;
     }
     div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] button p {
         width: auto !important;
@@ -4020,13 +4034,17 @@ if active_page != "dashboard" and active_step == 0:
                     group_index = group_options.index(current_group)
                 group_button_label = current_group if len(current_group) <= 18 else f"{current_group[:17]}..."
                 with st.popover(group_button_label, help="Changer le groupe"):
+                    picker_key = f"account_group_picker_{account_id}"
+                    st.session_state.setdefault(picker_key, current_group)
                     selected_group = st.selectbox(
                         f"Groupe {account_id}",
                         group_options,
                         index=group_index,
-                        key=f"account_group_{account_id}",
+                        key=picker_key,
                         label_visibility="collapsed",
                     )
+                    if selected_group != current_group:
+                        st.session_state[f"account_group_{account_id}"] = selected_group
             with row_cols[3]:
                 st.markdown(
                     f"<span class='next-post-pill'>{h(next_by_account.get(account_id, '-'))}</span>",
