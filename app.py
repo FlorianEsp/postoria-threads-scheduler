@@ -3894,7 +3894,7 @@ if active_page != "dashboard" and active_step == 0:
             st.session_state.setdefault(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1)))
             st.session_state.setdefault(f"account_use_{account_id}", False)
 
-        top_a, top_b, top_c = st.columns([1.15, 1.15, .65])
+        top_a, top_b, top_c, top_d = st.columns([1.15, 1.15, .95, .55])
         with top_a:
             account_query = st.text_input("Search accounts", placeholder="Search accounts...", label_visibility="collapsed")
         with top_b:
@@ -3904,6 +3904,8 @@ if active_page != "dashboard" and active_step == 0:
                 horizontal=True,
                 label_visibility="collapsed",
             )
+        with top_c:
+            activate_visible = st.button("Activer les comptes visibles", key="activate_visible_accounts")
         visible_accounts = []
         query = account_query.strip().lower()
         for account in accounts:
@@ -3918,8 +3920,16 @@ if active_page != "dashboard" and active_step == 0:
             if status_filter != "All" and status != status_filter:
                 continue
             visible_accounts.append(enriched)
-        with top_c:
+        with top_d:
             st.markdown(f"<div class='accounts-count'>{len(visible_accounts)} of {len(accounts)}</div>", unsafe_allow_html=True)
+        if activate_visible:
+            for account in visible_accounts:
+                account_id = int(account["id"])
+                group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
+                selected = bool(st.session_state.get(f"account_use_{account_id}", False))
+                db.update_account_preferences(account_id, group_name, True, selected)
+                st.session_state[f"account_status_enabled_v2_{account_id}"] = True
+            st.rerun()
 
         selected_total = sum(
             1 for account in accounts
@@ -3983,7 +3993,9 @@ if active_page != "dashboard" and active_step == 0:
         with continue_right:
             if st.button("Continuer vers Cadence", type="primary", disabled=not selected_accounts_preview):
                 st.session_state["account_step_done"] = True
-                st.success("Comptes validés. Ouvre l'onglet 2. Cadence pour régler le volume et les horaires.")
+                st.session_state["active_step"] = 1
+                st.session_state["app_page"] = "cadence"
+                st.rerun()
 
         st.markdown(
             "<div class='accounts-shell-lite'>"
@@ -4040,23 +4052,19 @@ if active_page != "dashboard" and active_step == 0:
                     unsafe_allow_html=True,
                 )
             with row_cols[2]:
-                group_index = 0
                 current_group = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
-                if current_group in group_options:
-                    group_index = group_options.index(current_group)
                 group_button_label = current_group if len(current_group) <= 18 else f"{current_group[:17]}..."
+                selected_group = current_group
                 with st.popover(group_button_label, help="Changer le groupe"):
-                    picker_key = f"account_group_picker_{account_id}"
-                    st.session_state.setdefault(picker_key, current_group)
-                    selected_group = st.selectbox(
-                        f"Groupe {account_id}",
-                        group_options,
-                        index=group_index,
-                        key=picker_key,
-                        label_visibility="collapsed",
-                    )
-                    if selected_group != current_group:
-                        st.session_state[f"account_group_{account_id}"] = selected_group
+                    st.caption("Choisir un groupe")
+                    for option_index, group_name in enumerate(group_options):
+                        if st.button(
+                            group_name,
+                            key=f"account_group_choice_{account_id}_{option_index}",
+                            type="primary" if group_name == current_group else "secondary",
+                        ):
+                            st.session_state[f"account_group_{account_id}"] = group_name
+                            st.rerun()
             with row_cols[3]:
                 st.markdown(
                     f"<span class='next-post-pill'>{h(next_by_account.get(account_id, '-'))}</span>",
