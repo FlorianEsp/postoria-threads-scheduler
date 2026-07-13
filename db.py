@@ -257,10 +257,6 @@ def init_db() -> None:
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE TABLE IF NOT EXISTS app_state (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
             """
         )
         _ensure_column(conn, "post_library", "media_ids", "TEXT DEFAULT ''")
@@ -543,21 +539,6 @@ def update_account_preferences(account_id: int, group_name: str, active_for_day:
         conn.execute(
             "UPDATE accounts SET group_name=?, active_for_day=?, selected_for_schedule=? WHERE id=?",
             (clean_group, int(bool(active_for_day)), int(bool(selected_for_schedule)), int(account_id)),
-        )
-
-
-def get_app_state(key: str) -> str | None:
-    with connect() as conn:
-        row = conn.execute("SELECT value FROM app_state WHERE key=?", (str(key),)).fetchone()
-    return str(row["value"]) if row else None
-
-
-def set_app_state(key: str, value: str) -> None:
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO app_state (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(key), str(value)),
         )
 
 
