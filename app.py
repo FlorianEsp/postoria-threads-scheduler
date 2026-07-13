@@ -169,7 +169,7 @@ def restore_account_selection_from_db(accounts: list[dict]) -> None:
         selected = bool(account.get("selected_for_schedule", active))
         account_states.append((account_id, group_name, active, selected))
         st.session_state.setdefault(f"account_group_{account_id}", group_name)
-        st.session_state.setdefault(f"account_enabled_{account_id}", active)
+        st.session_state.setdefault(f"account_status_enabled_v2_{account_id}", active)
         st.session_state.setdefault(f"account_use_{account_id}", active and selected)
         if active and selected:
             selected_groups.add(group_name)
@@ -3790,7 +3790,7 @@ if active_page != "dashboard" and active_step == 0:
                             st.error(str(e))
 
     # New and existing accounts start active once. Selection remains a separate state.
-    activated_defaults = db.activate_all_accounts_once("v5")
+    activated_defaults = db.activate_all_accounts_once("v6")
     # The database is the source of truth for active/paused state; session data can be stale after a sync.
     accounts = db.list_accounts()
     st.session_state["threads_accounts"] = accounts
@@ -3799,7 +3799,7 @@ if active_page != "dashboard" and active_step == 0:
     else:
         if activated_defaults:
             for account in accounts:
-                st.session_state[f"account_enabled_{int(account['id'])}"] = True
+                st.session_state[f"account_status_enabled_v2_{int(account['id'])}"] = True
         st.markdown("#### Choisir les comptes")
         groups = db.list_groups()
         group_color_by_name = {group["name"]: group.get("color") for group in groups}
@@ -3842,7 +3842,7 @@ if active_page != "dashboard" and active_step == 0:
             for account in accounts:
                 account_id = int(account["id"])
                 group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
-                active = bool(st.session_state.get(f"account_enabled_{account_id}", bool(account.get("active_for_day", 1))))
+                active = bool(st.session_state.get(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1))))
                 base_use = active and group_name in selected_group_filters
                 if account_id in manual_excluded:
                     st.session_state[f"account_use_{account_id}"] = False
@@ -3891,7 +3891,7 @@ if active_page != "dashboard" and active_step == 0:
         for account in accounts:
             account_id = int(account["id"])
             st.session_state.setdefault(f"account_group_{account_id}", account.get("group_name") or "tous")
-            st.session_state.setdefault(f"account_enabled_{account_id}", bool(account.get("active_for_day", 1)))
+            st.session_state.setdefault(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1)))
             st.session_state.setdefault(f"account_use_{account_id}", False)
 
         top_a, top_b, top_c = st.columns([1.15, 1.15, .65])
@@ -3909,7 +3909,7 @@ if active_page != "dashboard" and active_step == 0:
         for account in accounts:
             account_id = int(account["id"])
             group_name = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
-            active = bool(st.session_state.get(f"account_enabled_{account_id}", bool(account.get("active_for_day", 1))))
+            active = bool(st.session_state.get(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1))))
             enriched = {**account, "group_name": group_name, "active_for_day": int(active)}
             status = account_status_label(enriched)
             label_text = f"{account.get('name','')} {account.get('username','')} {group_name}".lower()
@@ -3924,14 +3924,14 @@ if active_page != "dashboard" and active_step == 0:
         selected_total = sum(
             1 for account in accounts
             if st.session_state.get(f"account_use_{int(account['id'])}", False)
-            and st.session_state.get(f"account_enabled_{int(account['id'])}", True)
+            and st.session_state.get(f"account_status_enabled_v2_{int(account['id'])}", True)
         )
         selected_visible = sum(
             1 for account in visible_accounts
             if st.session_state.get(f"account_use_{int(account['id'])}", False)
-            and st.session_state.get(f"account_enabled_{int(account['id'])}", True)
+            and st.session_state.get(f"account_status_enabled_v2_{int(account['id'])}", True)
         )
-        paused_visible = sum(1 for account in visible_accounts if not st.session_state.get(f"account_enabled_{int(account['id'])}", True))
+        paused_visible = sum(1 for account in visible_accounts if not st.session_state.get(f"account_status_enabled_v2_{int(account['id'])}", True))
         st.markdown(
             "<div class='accounts-selection-line'>"
             f"<strong>{selected_total} comptes sélectionnés</strong>"
@@ -3943,7 +3943,7 @@ if active_page != "dashboard" and active_step == 0:
         selected_accounts_preview = [
             account for account in accounts
             if st.session_state.get(f"account_use_{int(account['id'])}", False)
-            and st.session_state.get(f"account_enabled_{int(account['id'])}", True)
+            and st.session_state.get(f"account_status_enabled_v2_{int(account['id'])}", True)
         ]
         with st.expander(f"Comptes sélectionnés ({len(selected_accounts_preview)})", expanded=False):
             header_left, header_right = st.columns([2, 1])
@@ -4007,7 +4007,7 @@ if active_page != "dashboard" and active_step == 0:
         for row_index, account in enumerate(visible_accounts):
             account_id = int(account["id"])
             account_is_active = bool(
-                st.session_state.get(f"account_enabled_{account_id}", bool(account.get("active_for_day", 1)))
+                st.session_state.get(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1)))
             )
             if not account_is_active:
                 st.session_state[f"account_use_{account_id}"] = False
@@ -4065,7 +4065,7 @@ if active_page != "dashboard" and active_step == 0:
             with row_cols[4]:
                 active_account = st.toggle(
                     f"Compte actif {account_id}",
-                    key=f"account_enabled_{account_id}",
+                    key=f"account_status_enabled_v2_{account_id}",
                     label_visibility="collapsed",
                 )
                 if not active_account:
@@ -4112,7 +4112,7 @@ if active_page != "dashboard" and active_step == 0:
                     "id": account_id,
                     "compte": account_label(account),
                     "group": st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous"),
-                    "active": bool(st.session_state.get(f"account_enabled_{account_id}", bool(account.get("active_for_day", 1)))),
+                    "active": bool(st.session_state.get(f"account_status_enabled_v2_{account_id}", bool(account.get("active_for_day", 1)))),
                     "url": account.get("url", ""),
                 }
             )
