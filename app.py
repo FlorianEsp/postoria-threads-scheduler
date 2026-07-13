@@ -3789,24 +3789,25 @@ if active_page != "dashboard" and active_step == 0:
                         except Exception as e:
                             st.error(str(e))
 
-    accounts = st.session_state.get("threads_accounts") or db.list_accounts()
+    # The database is the source of truth for active/paused state; session data can be stale after a sync.
+    accounts = db.list_accounts()
+    st.session_state["threads_accounts"] = accounts
     if not accounts:
         st.info("Aucun compte local. Charge les comptes Postoria d'abord.")
     else:
         # Existing local accounts used to be imported as paused. Make all accounts active once,
         # while keeping the user's current scheduling selection unchanged.
-        if db.get_app_state("accounts_active_by_default_v2") != "done":
-            refreshed_accounts = []
+        if db.get_app_state("accounts_active_by_default_v3") != "done":
             for account in accounts:
                 account_id = int(account["id"])
                 group_name = account.get("group_name") or "tous"
                 selected = bool(account.get("selected_for_schedule", False))
                 db.update_account_preferences(account_id, group_name, True, selected)
                 st.session_state[f"account_active_{account_id}"] = True
-                refreshed_accounts.append({**account, "active_for_day": 1})
-            accounts = refreshed_accounts
+            # Read the saved state again so the page cannot keep an old paused copy in memory.
+            accounts = db.list_accounts()
             st.session_state["threads_accounts"] = accounts
-            db.set_app_state("accounts_active_by_default_v2", "done")
+            db.set_app_state("accounts_active_by_default_v3", "done")
         st.markdown("#### Choisir les comptes")
         groups = db.list_groups()
         group_color_by_name = {group["name"]: group.get("color") for group in groups}
