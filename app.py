@@ -1123,12 +1123,8 @@ def render_app_header(api_exists: bool, dry_run: bool, app_tz: str) -> None:
     api_state = "API détectée" if api_exists else "API manquante"
     run_state = "Dry-run actif" if dry_run else "Envoi réel armé"
     st.markdown(
-        "<div class='app-hero'>"
-        "<div>"
-        "<span class='eyebrow'>Bulk Threads</span>"
-        "<h1>Scheduler de publication</h1>"
-        "<p>Un parcours en 7 étapes pour choisir les comptes, calculer la cadence, sélectionner les contenus, vérifier la preview, envoyer, puis suivre les statuts.</p>"
-        "</div>"
+        "<div class='app-hero app-topbar'>"
+        "<span class='topbar-title'>Postoria Threads</span>"
         "<div class='hero-status'>"
         f"<span class='status-pill {'ok' if api_exists else 'warn'}'>{h(api_state)}</span>"
         f"<span class='status-pill {'warn' if dry_run else 'ok'}'>{h(run_state)}</span>"
@@ -1137,6 +1133,101 @@ def render_app_header(api_exists: bool, dry_run: bool, app_tz: str) -> None:
         "</div>",
         unsafe_allow_html=True,
     )
+
+
+def render_dashboard_overview(accounts: list[dict], posts: list[dict], preview_rows: list[dict], scheduled_rows: list[dict]) -> None:
+    failed_rows = [row for row in scheduled_rows if is_failed_status(row)]
+    planned_rows = [
+        row for row in scheduled_rows
+        if str(row.get("status")) not in ("preview", "preview_saved") and not is_failed_status(row)
+    ]
+    active_accounts = sum(1 for account in accounts if bool(account.get("active_for_day", 1)))
+    st.markdown("<span class='page-kicker'>DASHBOARD</span>", unsafe_allow_html=True)
+    st.title("Vue d'ensemble")
+    st.caption("Les chiffres viennent des comptes, posts et statuts déjà enregistrés dans cette application.")
+    render_metric_strip(
+        [
+            ("Comptes", str(len(accounts)), f"{active_accounts} actifs"),
+            ("Bibliothèque", str(len(posts)), "posts importés"),
+            ("À envoyer", str(len(preview_rows)), "dans la preview"),
+            ("Failed", str(len(failed_rows)), "à contrôler"),
+        ]
+    )
+
+    dashboard_left, dashboard_right = st.columns([.9, 1.7])
+    with dashboard_left:
+        st.markdown("#### Prochaines publications")
+        if preview_rows:
+            upcoming = scheduled_dataframe(preview_rows).sort_values("scheduled_time_local").head(7)
+            st.dataframe(
+                upcoming[["day", "time", "account_name", "group_name", "text"]],
+                use_container_width=True,
+                hide_index=True,
+                height=330,
+            )
+        else:
+            st.info("Aucune preview en attente. Crée une preview depuis Planification.")
+        dashboard_actions_a, dashboard_actions_b = st.columns(2)
+        with dashboard_actions_a:
+            if st.button("Voir les comptes", key="dashboard_accounts", use_container_width=True):
+                st.session_state["app_page"] = "accounts"
+                st.rerun()
+        with dashboard_actions_b:
+            if st.button("Ouvrir preview", key="dashboard_preview", use_container_width=True):
+                st.session_state["app_page"] = "preview"
+                st.rerun()
+
+    with dashboard_right:
+        st.markdown("#### Publications enregistrées")
+        schedule_df = scheduled_dataframe(scheduled_rows)
+        if schedule_df.empty:
+            st.info("Les volumes apparaîtront après la première preview ou le premier envoi.")
+        else:
+            by_day = count_by(schedule_df, ["day"]).set_index("day")["posts"]
+            st.line_chart(by_day, height=210)
+            recent = schedule_df.sort_values("scheduled_time_local", ascending=False).head(8)
+            st.dataframe(
+                recent[["day", "time", "account_name", "group_name", "status", "text"]],
+                use_container_width=True,
+                hide_index=True,
+                height=260,
+            )
+        st.caption(f"{len(planned_rows)} posts planifiés ou envoyés, hors preview locale.")
+
+
+def render_sidebar_navigation(active_page: str, api_exists: bool, dry_run_default: bool) -> tuple[str, bool]:
+    page_groups = [
+        ("PLANIFICATION", [("dashboard", "Dashboard"), ("accounts", "Comptes"), ("cadence", "Cadence"), ("posts", "Posts"), ("preview", "Preview")]),
+        ("ANALYSE", [("analytics", "Analytics")]),
+        ("ENVOI", [("send", "Envoi Postoria"), ("tracking", "Suivi")]),
+    ]
+    with st.sidebar:
+        st.markdown(
+            "<div class='sidebar-brand'><b>Postoria</b><span>THREADS SCHEDULER</span></div>",
+            unsafe_allow_html=True,
+        )
+        for section, pages in page_groups:
+            st.markdown(f"<div class='sidebar-section'>{section}</div>", unsafe_allow_html=True)
+            for page_key, label in pages:
+                if st.button(
+                    label,
+                    key=f"sidebar_nav_{page_key}",
+                    type="primary" if active_page == page_key else "secondary",
+                    use_container_width=True,
+                ):
+                    active_page = page_key
+                    st.session_state["app_page"] = page_key
+        st.divider()
+        with st.expander("Réglages", expanded=False):
+            dry_run = st.toggle("Mode dry-run", value=dry_run_default, key="sidebar_dry_run")
+            st.caption("API " + ("détectée" if api_exists else "manquante"))
+            st.caption("Fuseau : " + APP_TZ)
+        st.markdown("<div class='sidebar-section'>RECOMMENCER</div>", unsafe_allow_html=True)
+        if st.button("Recommencer planning", key="sidebar_reset_planning", use_container_width=True):
+            st.session_state["reset_dialog_mode"] = "planning"
+        if st.button("Recommencer tout", key="sidebar_reset_all", use_container_width=True):
+            st.session_state["reset_dialog_mode"] = "all"
+    return active_page, bool(st.session_state.get("sidebar_dry_run", dry_run_default))
 
 
 def render_metric_strip(metrics: list[tuple[str, str, str]]) -> None:
@@ -2810,6 +2901,136 @@ st.markdown(
         padding: 0 !important;
         background: transparent !important;
     }
+    /* Application shell inspired by operational social scheduling tools. */
+    [data-testid="stSidebar"] {
+        min-width: 252px;
+        max-width: 252px;
+        background: #111113 !important;
+        border-right: 1px solid var(--line) !important;
+    }
+    [data-testid="stSidebar"] > div:first-child {
+        padding: 18px 12px 22px;
+    }
+    .sidebar-brand {
+        display: grid;
+        gap: 3px;
+        padding: 8px 10px 24px;
+    }
+    .sidebar-brand b {
+        color: var(--text);
+        font-size: 1.12rem;
+        letter-spacing: 0;
+    }
+    .sidebar-brand span,
+    .sidebar-section,
+    .page-kicker {
+        color: var(--faint);
+        font-size: .68rem;
+        font-weight: 800;
+        letter-spacing: .12em;
+    }
+    .sidebar-section {
+        margin: 18px 10px 7px;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] {
+        margin: 1px 0 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] button {
+        min-height: 38px !important;
+        padding: 8px 11px !important;
+        justify-content: flex-start !important;
+        border-color: transparent !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        color: var(--muted) !important;
+        font-size: .9rem;
+        font-weight: 620;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] button:hover {
+        transform: none !important;
+        border-color: transparent !important;
+        background: rgba(255, 255, 255, .055) !important;
+        color: var(--text) !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"] {
+        position: relative;
+        background: rgba(255, 255, 255, .065) !important;
+        color: var(--text) !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]::before {
+        position: absolute;
+        left: 0;
+        width: 3px;
+        height: 18px;
+        border-radius: 0 3px 3px 0;
+        background: var(--accent);
+        content: "";
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] {
+        margin: 14px 0 8px !important;
+        background: rgba(255, 255, 255, .025) !important;
+    }
+    .app-hero.app-topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 58px;
+        margin: -2rem -2.4rem 26px !important;
+        padding: 0 2.4rem !important;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        border-radius: 0;
+        background: rgba(17, 17, 19, .76);
+        box-shadow: none;
+    }
+    .topbar-title {
+        color: var(--muted);
+        font-size: .82rem;
+        font-weight: 740;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+    }
+    .app-topbar .hero-status {align-items: center;}
+    .app-topbar .status-pill {
+        padding: 5px 8px;
+        font-size: .72rem;
+    }
+    .page-kicker {
+        display: block;
+        margin: 2px 0 8px;
+        color: var(--accent);
+    }
+    .stApp h1 {
+        font-size: clamp(2rem, 3vw, 2.7rem) !important;
+        line-height: 1.06 !important;
+        margin: 0 0 .35rem !important;
+    }
+    .stApp h2 {
+        font-size: 1.5rem !important;
+        margin: 0 0 .8rem !important;
+    }
+    .section-intro {
+        border: 0 !important;
+        border-left: 2px solid rgba(244, 63, 94, .55) !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        padding: 4px 0 4px 16px !important;
+        margin: 8px 0 24px !important;
+    }
+    .section-intro strong {font-size: 1.12rem;}
+    .section-intro p {max-width: 72ch;}
+    .metric-strip {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        margin: 18px 0 26px !important;
+        border-radius: 10px;
+    }
+    .metric-cell,
+    .posts-stats div,
+    .account-selection-summary div {
+        padding: 14px 16px !important;
+    }
+    .metric-cell strong {font-size: 1.45rem;}
     @media (max-width: 900px) {
         .block-container {
             padding: 1.3rem 1rem 4rem !important;
@@ -2818,6 +3039,13 @@ st.markdown(
         .section-intro {
             padding: 20px !important;
         }
+        .app-hero.app-topbar {
+            min-height: 52px;
+            margin: -1.3rem -1rem 18px !important;
+            padding: 0 1rem !important;
+        }
+        .topbar-title {display: none;}
+        .app-topbar .hero-status {width: 100%; justify-content: space-between;}
         .app-hero, .metric-strip, .flow-rail {
             grid-template-columns: 1fr;
         }
@@ -2861,27 +3089,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-with st.sidebar:
-    st.header("Configuration")
-    api_exists = bool(os.getenv("POSTORIA_API_KEY"))
-    st.write("Clé API .env :", "détectée" if api_exists else "manquante")
-    dry_run = st.toggle("Mode dry-run", value=True)
-    st.write("Timezone :", APP_TZ)
-    st.divider()
-    st.write("Flux conseillé")
-    st.write("1. Choisir groupes/comptes")
-    st.write("2. Définir la cadence")
-    st.write("3. Charger textes + médias")
-    st.write("4. Vérifier la preview")
-    st.write("5. Lire les analytics")
-    st.write("6. Confirmer l'envoi")
-    st.write("7. Suivre les statuts")
-    st.divider()
-    st.write("Recommencer")
-    if st.button("Recommencer planning"):
-        st.session_state["reset_dialog_mode"] = "planning"
-    if st.button("Recommencer tout"):
-        st.session_state["reset_dialog_mode"] = "all"
+api_exists = bool(os.getenv("POSTORIA_API_KEY"))
+st.session_state.setdefault("app_page", "dashboard")
+st.session_state.setdefault("sidebar_dry_run", True)
+dry_run = bool(st.session_state["sidebar_dry_run"])
 
 client = None
 if api_exists:
@@ -2907,23 +3118,34 @@ analytics_ready = len(scheduled_all) > 0
 send_ready = preview_ready and api_exists and not dry_run
 tracking_ready = any(str(row.get("status")) != "preview" or row.get("postoria_post_id") for row in scheduled_all)
 
+active_page, dry_run = render_sidebar_navigation(
+    str(st.session_state.get("app_page", "dashboard")),
+    api_exists,
+    dry_run,
+)
+st.session_state["app_page"] = active_page
+page_to_step = {
+    "accounts": 0,
+    "cadence": 1,
+    "posts": 2,
+    "preview": 3,
+    "analytics": 4,
+    "send": 5,
+    "tracking": 6,
+}
+active_step = page_to_step.get(active_page, int(st.session_state.get("active_step", 0)))
+st.session_state["active_step"] = active_step
+
 render_app_header(api_exists, dry_run, APP_TZ)
 if st.session_state.get("reset_dialog_mode"):
     render_reset_dialog(str(st.session_state["reset_dialog_mode"]))
 if st.session_state.get("preview_cleared_notice"):
     st.info(st.session_state.pop("preview_cleared_notice"))
-render_metric_strip(
-    [
-        ("Comptes prêts", str(selected_accounts_count), "sélection depuis groupes"),
-        ("Textes prêts", str(selected_posts_count), "rotation possible"),
-        ("Preview", str(len(preview)), "posts à vérifier"),
-        ("Analytics", str(len(db.list_scheduled())), "posts analysés"),
-    ]
-)
 
-active_step = render_flow_status(accounts_ready, cadence_ready, posts_ready, preview_ready, analytics_ready, send_ready, tracking_ready)
+if active_page == "dashboard":
+    render_dashboard_overview(stored_accounts, posts, preview, scheduled_all)
 
-if active_step == 0:
+if active_page != "dashboard" and active_step == 0:
     st.subheader("Comptes et groupes")
     section_intro(
         "Étape 1",
@@ -3301,7 +3523,7 @@ if active_step == 0:
             st.warning("Aucun compte sélectionné. Les étapes suivantes restent bloquées.")
         render_group_summary(grouped)
 
-if active_step == 1:
+if active_page != "dashboard" and active_step == 1:
     st.subheader("Cadence de publication")
     section_intro(
         "Étape 2",
@@ -3460,11 +3682,11 @@ if active_step == 1:
             st.success("Cadence appliquée.")
         st.info(distribution_sentence(settings()))
 
-if active_step == 2:
-    st.subheader("Posts & Photos")
+if active_page != "dashboard" and active_step == 2:
+    st.subheader("Posts")
     section_intro(
         "Étape 3",
-        "Ajoute puis sélectionne les textes, les variables, les dossiers média et les replies en chaîne.",
+        "Ajoute puis sélectionne les textes. Une photo peut ensuite être attachée au post choisi.",
         "Les médias utilisent des media IDs déjà disponibles. Les replies sont préparées en preview.",
     )
     current = settings()
@@ -3517,12 +3739,12 @@ if active_step == 2:
             )
         folder_options = [""] + [f["name"] for f in folders]
 
-        st.markdown("#### Photos locales")
+        st.markdown("#### Photos")
         st.caption("Ajoute les images d'abord. Ensuite ouvre la galerie, sélectionne une photo, puis range-la dans un groupe ou ajoute son media ID Postoria.")
         upload_col, gallery_col = st.columns([1.35, 1])
         with upload_col:
             photo_uploads = st.file_uploader(
-                "Ajouter photos",
+                "+ Ajouter des photos",
                 type=["png", "jpg", "jpeg", "webp"],
                 accept_multiple_files=True,
                 help="Import local uniquement. Tu pourras choisir le groupe après dans la galerie.",
@@ -4045,7 +4267,7 @@ if active_step == 2:
             else:
                 st.warning("Aucun post sélectionné. Preview bloquée.")
 
-if active_step == 3:
+if active_page != "dashboard" and active_step == 3:
     st.subheader("Preview du planning")
     section_intro(
         "Étape 4",
@@ -4292,7 +4514,7 @@ if active_step == 3:
             ],
         )
 
-if active_step == 4:
+if active_page != "dashboard" and active_step == 4:
     st.subheader("Analytics de volume")
     section_intro(
         "Étape 5",
@@ -4312,7 +4534,7 @@ if active_step == 4:
         ]
     render_analytics(analytics_rows)
 
-if active_step == 5:
+if active_page != "dashboard" and active_step == 5:
     st.subheader("Envoi Postoria")
     section_intro(
         "Étape 6",
@@ -4463,7 +4685,7 @@ if active_step == 5:
             column_config={"threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir")},
         )
 
-if active_step == 6:
+if active_page != "dashboard" and active_step == 6:
     st.subheader("Suivi après envoi")
     section_intro(
         "Étape 7",
