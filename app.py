@@ -3453,16 +3453,17 @@ st.markdown(
         background: #18181b !important;
     }
     .account-table-head {
-        grid-template-columns: 44px 2.05fr .82fr 1.02fr .9fr .56fr .5fr;
-        min-height: 54px;
-        padding: 12px 18px;
+        grid-template-columns: 44px minmax(260px, 2.25fr) minmax(120px, .9fr) minmax(105px, .78fr) 64px 44px;
+        min-height: 50px;
+        padding: 10px 18px;
         letter-spacing: .1em;
     }
     div[data-testid="stHorizontalBlock"]:has(.account-person) {
         align-items: center !important;
-        min-height: 68px;
+        gap: 14px !important;
+        min-height: 72px;
         margin: 0 !important;
-        padding: 4px 18px;
+        padding: 6px 18px;
         border-right: 1px solid var(--line);
         border-bottom: 1px solid var(--line);
         border-left: 1px solid var(--line);
@@ -3471,11 +3472,18 @@ st.markdown(
     div[data-testid="stHorizontalBlock"]:has(.account-person):hover {
         background: rgba(255,255,255,.025);
     }
+    div[data-testid="stHorizontalBlock"]:has(.account-person):has([data-testid="stCheckbox"] input:checked) {
+        background: rgba(223, 77, 110, .065);
+        box-shadow: inset 3px 0 0 var(--accent);
+    }
     div[data-testid="stHorizontalBlock"]:has(.account-person) > div {
         min-width: 0;
     }
     div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stVerticalBlock"] {
         gap: 0 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stMarkdownContainer"] {
+        padding: 0 !important;
     }
     div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stCheckbox"] {
         display: flex;
@@ -3495,30 +3503,62 @@ st.markdown(
         justify-content: center;
         margin: 0 !important;
     }
-    .account-note {
-        color: var(--faint);
-        font-size: .78rem;
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] {
+        margin: 0 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] > button {
+        width: auto !important;
+        min-height: 32px !important;
+        padding: 5px 9px !important;
+        border-radius: 7px !important;
+        background: rgba(223, 77, 110, .10) !important;
+        border-color: rgba(223, 77, 110, .24) !important;
+        color: #f7c6d2 !important;
+        font-size: .76rem !important;
+        white-space: nowrap !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.account-person) [data-testid="stPopover"] > button p {
+        width: auto !important;
+        font-weight: 720 !important;
+    }
     }
     .account-row-divider {display: none;}
     .account-person {
         grid-template-columns: 42px minmax(0, 1fr);
         gap: 10px;
-        min-height: 58px;
+        min-height: 52px;
     }
     .account-avatar, .account-avatar-fallback {
         width: 40px;
         height: 40px;
     }
     .account-name strong {font-size: .9rem;}
-    .account-name small {font-size: .78rem;}
+    .account-name small {
+        max-width: 25ch;
+        font-size: .78rem;
+    }
     .account-group-badge {
         padding: 5px 8px;
         font-size: .76rem;
     }
     .next-post-pill, .status-text {font-size: .78rem;}
     .account-actions a {
-        padding: 5px 7px;
-        font-size: .74rem;
+        display: inline-grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--muted);
+        font-size: 1rem;
+        line-height: 1;
+        text-decoration: none;
+    }
+    .account-actions a:hover {
+        color: var(--text);
+        border-color: rgba(223, 77, 110, .55);
+        background: var(--accent-soft);
     }
     @media (max-width: 900px) {
         .block-container {
@@ -3868,7 +3908,7 @@ if active_page != "dashboard" and active_step == 0:
         st.markdown(
             "<div class='accounts-shell-lite'>"
             "<div class='account-table-head'>"
-            "<span></span><span>COMPTE</span><span>NOTES</span><span>GROUPE</span><span>PROCHAIN POST</span><span>STATUT</span><span>ACTIONS</span>"
+            "<span></span><span>COMPTE</span><span>GROUPE</span><span>PROCHAIN POST</span><span>ACTIF</span><span></span>"
             "</div>"
             "</div>",
             unsafe_allow_html=True,
@@ -3888,7 +3928,7 @@ if active_page != "dashboard" and active_step == 0:
             account_id = int(account["id"])
             if row_index:
                 st.markdown("<div class='account-row-divider'></div>", unsafe_allow_html=True)
-            row_cols = st.columns([.32, 2.05, .82, 1.02, .9, .56, .5])
+            row_cols = st.columns([.32, 2.25, .9, .78, .5, .3])
             with row_cols[0]:
                 use_account = st.checkbox("Utiliser", key=f"account_use_{account_id}", label_visibility="collapsed")
             with row_cols[1]:
@@ -3910,25 +3950,25 @@ if active_page != "dashboard" and active_step == 0:
                     unsafe_allow_html=True,
                 )
             with row_cols[2]:
-                st.markdown("<span class='account-note'>-</span>", unsafe_allow_html=True)
-            with row_cols[3]:
                 group_index = 0
                 current_group = st.session_state.get(f"account_group_{account_id}", account.get("group_name") or "tous")
                 if current_group in group_options:
                     group_index = group_options.index(current_group)
-                selected_group = st.selectbox(
-                    f"Groupe {account_id}",
-                    group_options,
-                    index=group_index,
-                    key=f"account_group_{account_id}",
-                    label_visibility="collapsed",
-                )
-            with row_cols[4]:
+                group_button_label = current_group if len(current_group) <= 18 else f"{current_group[:17]}..."
+                with st.popover(group_button_label, help="Changer le groupe"):
+                    selected_group = st.selectbox(
+                        f"Groupe {account_id}",
+                        group_options,
+                        index=group_index,
+                        key=f"account_group_{account_id}",
+                        label_visibility="collapsed",
+                    )
+            with row_cols[3]:
                 st.markdown(
                     f"<span class='next-post-pill'>{h(next_by_account.get(account_id, '-'))}</span>",
                     unsafe_allow_html=True,
                 )
-            with row_cols[5]:
+            with row_cols[4]:
                 active_account = st.toggle(
                     f"Compte actif {account_id}",
                     key=f"account_active_{account_id}",
@@ -3944,12 +3984,12 @@ if active_page != "dashboard" and active_step == 0:
                 else:
                     manual_excluded.add(account_id)
                     manual_included.discard(account_id)
-            with row_cols[6]:
+            with row_cols[5]:
                 account_url = account_threads_url(account) or account.get("url")
                 action_link = (
-                    f"<a href='{h(account_url)}' target='_blank' rel='noreferrer'>Threads</a>"
+                    f"<a href='{h(account_url)}' target='_blank' rel='noreferrer' title='Ouvrir ce compte dans Threads' aria-label='Ouvrir ce compte dans Threads'>&nearr;</a>"
                     if account_url
-                    else "<span>Aucun lien</span>"
+                    else ""
                 )
                 st.markdown(f"<div class='account-actions'>{action_link}</div>", unsafe_allow_html=True)
             rows.append(
