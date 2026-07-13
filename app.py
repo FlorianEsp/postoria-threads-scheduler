@@ -1142,57 +1142,103 @@ def render_dashboard_overview(accounts: list[dict], posts: list[dict], preview_r
         if str(row.get("status")) not in ("preview", "preview_saved") and not is_failed_status(row)
     ]
     active_accounts = sum(1 for account in accounts if bool(account.get("active_for_day", 1)))
-    st.markdown("<span class='page-kicker'>DASHBOARD</span>", unsafe_allow_html=True)
-    st.title("Vue d'ensemble")
-    st.caption("Les chiffres viennent des comptes, posts et statuts déjà enregistrés dans cette application.")
-    render_metric_strip(
-        [
-            ("Comptes", str(len(accounts)), f"{active_accounts} actifs"),
-            ("Bibliothèque", str(len(posts)), "posts importés"),
-            ("À envoyer", str(len(preview_rows)), "dans la preview"),
-            ("Failed", str(len(failed_rows)), "à contrôler"),
-        ]
+    now_local = datetime.now(ZoneInfo(APP_TZ))
+    upcoming_rows = sorted(
+        [row for row in preview_rows if not is_past_scheduled(row, now_local)],
+        key=lambda row: str(row.get("scheduled_time_local") or ""),
+    )[:5]
+    schedule_df = scheduled_dataframe(scheduled_rows)
+    day_dates = [now_local.date() - timedelta(days=offset) for offset in range(6, -1, -1)]
+    day_keys = [item.isoformat() for item in day_dates]
+    day_counts = {day: 0 for day in day_keys}
+    if not schedule_df.empty:
+        for day, count in schedule_df["day"].value_counts().to_dict().items():
+            if str(day) in day_counts:
+                day_counts[str(day)] = int(count)
+    max_day_count = max(day_counts.values(), default=0) or 1
+    chart_items = "".join(
+        "<div class='dashboard-chart-day'>"
+        f"<div class='dashboard-chart-bar' style='height:{max(4, round(day_counts[day] / max_day_count * 100))}%;'></div>"
+        f"<span>{day_dates[index].strftime('%a')}</span>"
+        "</div>"
+        for index, day in enumerate(day_keys)
     )
+    upcoming_html = "".join(
+        "<div class='dashboard-list-row'>"
+        "<span class='dashboard-list-time'>"
+        f"{h(str(row.get('scheduled_time_local') or '')[11:16] or '--:--')}"
+        "</span>"
+        "<div>"
+        f"<strong>{h(row.get('account_name') or 'Compte')}</strong>"
+        f"<small>{h(str(row.get('caption') or 'Sans texte')[:72])}</small>"
+        "</div>"
+        f"<em>{h(row.get('group_name') or 'Sans groupe')}</em>"
+        "</div>"
+        for row in upcoming_rows
+    ) or "<div class='dashboard-empty'>Aucune preview à venir</div>"
+    if schedule_df.empty:
+        top_accounts_html = "<div class='dashboard-empty'>Les comptes apparaîtront après la première preview.</div>"
+    else:
+        top_accounts = (
+            schedule_df.groupby("account_name", dropna=False)
+            .size()
+            .sort_values(ascending=False)
+            .head(5)
+        )
+        top_account_max = int(top_accounts.max()) or 1
+        top_accounts_html = "".join(
+            "<div class='dashboard-account-row'>"
+            f"<span>{h(account_name or 'Compte')}</span>"
+            f"<i><b style='width:{max(5, round(int(post_count) / top_account_max * 100))}%'></b></i>"
+            f"<strong>{int(post_count)}</strong>"
+            "</div>"
+            for account_name, post_count in top_accounts.items()
+        )
 
-    dashboard_left, dashboard_right = st.columns([.9, 1.7])
-    with dashboard_left:
-        st.markdown("#### Prochaines publications")
-        if preview_rows:
-            upcoming = scheduled_dataframe(preview_rows).sort_values("scheduled_time_local").head(7)
-            st.dataframe(
-                upcoming[["day", "time", "account_name", "group_name", "text"]],
-                use_container_width=True,
-                hide_index=True,
-                height=330,
-            )
-        else:
-            st.info("Aucune preview en attente. Crée une preview depuis Planification.")
-        dashboard_actions_a, dashboard_actions_b = st.columns(2)
-        with dashboard_actions_a:
-            if st.button("Voir les comptes", key="dashboard_accounts", use_container_width=True):
-                st.session_state["app_page"] = "accounts"
-                st.rerun()
-        with dashboard_actions_b:
-            if st.button("Ouvrir preview", key="dashboard_preview", use_container_width=True):
-                st.session_state["app_page"] = "preview"
-                st.rerun()
-
-    with dashboard_right:
-        st.markdown("#### Publications enregistrées")
-        schedule_df = scheduled_dataframe(scheduled_rows)
-        if schedule_df.empty:
-            st.info("Les volumes apparaîtront après la première preview ou le premier envoi.")
-        else:
-            by_day = count_by(schedule_df, ["day"]).set_index("day")["posts"]
-            st.line_chart(by_day, height=210)
-            recent = schedule_df.sort_values("scheduled_time_local", ascending=False).head(8)
-            st.dataframe(
-                recent[["day", "time", "account_name", "group_name", "status", "text"]],
-                use_container_width=True,
-                hide_index=True,
-                height=260,
-            )
-        st.caption(f"{len(planned_rows)} posts planifiés ou envoyés, hors preview locale.")
+    st.markdown(
+        "<section class='dashboard-heading'>"
+        "<div><span>DASHBOARD</span><h1>Planification Threads</h1>"
+        "<p>Comptes, bibliothèque et programmation dans une seule vue.</p></div>"
+        f"<small>{h(now_local.strftime('%d %b %Y · %H:%M'))}</small>"
+        "</section>"
+        "<section class='dashboard-metric-grid'>"
+        "<article><i class='dashboard-icon'>A</i><span>COMPTES</span>"
+        f"<strong>{len(accounts)}</strong><small>{active_accounts} actifs</small></article>"
+        "<article><i class='dashboard-icon'>P</i><span>BIBLIOTHÈQUE</span>"
+        f"<strong>{len(posts)}</strong><small>posts importés</small></article>"
+        "<article><i class='dashboard-icon'>Q</i><span>À ENVOYER</span>"
+        f"<strong>{len(preview_rows)}</strong><small>dans la preview</small></article>"
+        "<article><i class='dashboard-icon is-alert'>!</i><span>FAILED</span>"
+        f"<strong>{len(failed_rows)}</strong><small>à contrôler</small></article>"
+        "</section>"
+        "<section class='dashboard-grid'>"
+        "<article class='dashboard-panel dashboard-upcoming'>"
+        "<header><span>PROCHAINES PUBLICATIONS</span><b>Preview</b></header>"
+        f"<div class='dashboard-list'>{upcoming_html}</div>"
+        "</article>"
+        "<article class='dashboard-panel dashboard-chart'>"
+        "<header><span>PUBLICATIONS · 7 DERNIERS JOURS</span>"
+        f"<b>{len(planned_rows)} planifiés</b></header>"
+        "<div class='dashboard-chart-bars'>"
+        f"{chart_items}"
+        "</div>"
+        "</article>"
+        "<article class='dashboard-panel dashboard-accounts'>"
+        "<header><span>VOLUME PAR COMPTE</span><b>Historique local</b></header>"
+        f"<div class='dashboard-account-list'>{top_accounts_html}</div>"
+        "</article>"
+        "</section>",
+        unsafe_allow_html=True,
+    )
+    dashboard_actions_a, dashboard_actions_b = st.columns([1, 1.25])
+    with dashboard_actions_a:
+        if st.button("Voir les comptes", key="dashboard_accounts", use_container_width=True):
+            st.session_state["app_page"] = "accounts"
+            st.rerun()
+    with dashboard_actions_b:
+        if st.button("Ouvrir la preview", key="dashboard_preview", use_container_width=True):
+            st.session_state["app_page"] = "preview"
+            st.rerun()
 
 
 def render_sidebar_navigation(active_page: str, api_exists: bool, dry_run_default: bool) -> tuple[str, bool]:
@@ -1203,7 +1249,7 @@ def render_sidebar_navigation(active_page: str, api_exists: bool, dry_run_defaul
     ]
     with st.sidebar:
         st.markdown(
-            "<div class='sidebar-brand'><b>Postoria</b><span>THREADS SCHEDULER</span></div>",
+            "<div class='sidebar-brand'><i>P</i><div><b>Postoria</b><span>THREADS SCHEDULER</span></div></div>",
             unsafe_allow_html=True,
         )
         for section, pages in page_groups:
@@ -2912,9 +2958,23 @@ st.markdown(
         padding: 18px 12px 22px;
     }
     .sidebar-brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px 26px;
+    }
+    .sidebar-brand > i {
         display: grid;
-        gap: 3px;
-        padding: 8px 10px 24px;
+        width: 34px;
+        height: 34px;
+        place-items: center;
+        border: 1px solid rgba(244, 63, 94, .5);
+        border-radius: 50%;
+        background: rgba(244, 63, 94, .12);
+        color: var(--accent);
+        font-size: .9rem;
+        font-style: normal;
+        font-weight: 820;
     }
     .sidebar-brand b {
         color: var(--text);
@@ -3031,6 +3091,227 @@ st.markdown(
         padding: 14px 16px !important;
     }
     .metric-cell strong {font-size: 1.45rem;}
+    .dashboard-heading {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 24px;
+        margin: 28px 0 22px;
+    }
+    .dashboard-heading span {
+        display: block;
+        margin-bottom: 10px;
+        color: var(--faint);
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .12em;
+    }
+    .dashboard-heading h1 {
+        margin: 0 !important;
+        color: var(--text);
+        font-size: clamp(2.15rem, 3.4vw, 3.05rem) !important;
+        font-weight: 780;
+        line-height: 1;
+    }
+    .dashboard-heading p {
+        margin: 10px 0 0;
+        color: var(--muted);
+        font-size: .95rem;
+    }
+    .dashboard-heading > small {
+        padding-bottom: 4px;
+        color: var(--faint);
+        font-size: .78rem;
+        white-space: nowrap;
+    }
+    .dashboard-metric-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 22px;
+    }
+    .dashboard-metric-grid article,
+    .dashboard-panel {
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 12px;
+        background: #18181b;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+    }
+    .dashboard-metric-grid article {
+        position: relative;
+        min-height: 136px;
+        padding: 18px 18px 16px;
+    }
+    .dashboard-metric-grid span {
+        display: block;
+        padding-left: 38px;
+        color: var(--faint);
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .1em;
+    }
+    .dashboard-metric-grid strong {
+        display: block;
+        margin-top: 26px;
+        color: var(--text);
+        font-size: 1.85rem;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+    }
+    .dashboard-metric-grid small {
+        display: block;
+        margin-top: 9px;
+        color: var(--muted);
+        font-size: .78rem;
+    }
+    .dashboard-icon {
+        position: absolute;
+        display: grid;
+        width: 28px;
+        height: 28px;
+        place-items: center;
+        border-radius: 8px;
+        background: rgba(244, 63, 94, .12);
+        color: var(--accent);
+        font-size: .7rem;
+        font-style: normal;
+        font-weight: 840;
+    }
+    .dashboard-icon.is-alert {background: rgba(231, 185, 88, .12); color: var(--warn);}
+    .dashboard-grid {
+        display: grid;
+        grid-template-columns: minmax(280px, .75fr) minmax(0, 1.65fr);
+        gap: 14px;
+        align-items: stretch;
+    }
+    .dashboard-panel {min-width: 0; overflow: hidden;}
+    .dashboard-panel header {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 15px 18px;
+        border-bottom: 1px solid rgba(255,255,255,.08);
+    }
+    .dashboard-panel header span {
+        color: var(--faint);
+        font-size: .7rem;
+        font-weight: 800;
+        letter-spacing: .09em;
+    }
+    .dashboard-panel header b {
+        color: var(--accent);
+        font-size: .75rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+    .dashboard-list {min-height: 290px;}
+    .dashboard-list-row {
+        display: grid;
+        grid-template-columns: 48px minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        min-height: 57px;
+        padding: 8px 18px;
+        border-bottom: 1px solid rgba(255,255,255,.06);
+    }
+    .dashboard-list-row:last-child {border-bottom: 0;}
+    .dashboard-list-time {
+        color: var(--text);
+        font-size: .8rem;
+        font-variant-numeric: tabular-nums;
+        font-weight: 720;
+    }
+    .dashboard-list-row strong,
+    .dashboard-list-row small {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .dashboard-list-row strong {color: var(--text); font-size: .83rem;}
+    .dashboard-list-row small {margin-top: 3px; color: var(--muted); font-size: .73rem;}
+    .dashboard-list-row em {
+        color: var(--faint);
+        font-size: .7rem;
+        font-style: normal;
+        white-space: nowrap;
+    }
+    .dashboard-empty {
+        display: grid;
+        min-height: 180px;
+        place-items: center;
+        padding: 20px;
+        color: var(--muted);
+        font-size: .85rem;
+        text-align: center;
+    }
+    .dashboard-chart {min-height: 332px;}
+    .dashboard-chart-bars {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        align-items: end;
+        gap: 16px;
+        height: 255px;
+        padding: 24px 30px 16px;
+        background-image: linear-gradient(to bottom, rgba(255,255,255,.055) 1px, transparent 1px);
+        background-size: 100% 33.33%;
+    }
+    .dashboard-chart-day {
+        display: grid;
+        grid-template-rows: 1fr 18px;
+        align-items: end;
+        height: 100%;
+    }
+    .dashboard-chart-bar {
+        width: 100%;
+        align-self: end;
+        min-height: 4px;
+        border-radius: 4px 4px 0 0;
+        background: linear-gradient(180deg, rgba(244,63,94,.9), rgba(244,63,94,.42));
+    }
+    .dashboard-chart-day span {
+        margin-top: 8px;
+        color: var(--faint);
+        font-size: .72rem;
+        text-align: center;
+    }
+    .dashboard-accounts {
+        grid-column: 1 / -1;
+    }
+    .dashboard-account-list {padding: 5px 18px 12px;}
+    .dashboard-account-row {
+        display: grid;
+        grid-template-columns: minmax(120px, .6fr) minmax(90px, 1.8fr) 30px;
+        gap: 14px;
+        align-items: center;
+        min-height: 38px;
+    }
+    .dashboard-account-row span {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: .8rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .dashboard-account-row i {
+        display: block;
+        height: 4px;
+        overflow: hidden;
+        border-radius: 99px;
+        background: rgba(255,255,255,.08);
+    }
+    .dashboard-account-row i b {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--accent);
+    }
+    .dashboard-account-row strong {
+        color: var(--text);
+        font-size: .8rem;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+    }
     @media (max-width: 900px) {
         .block-container {
             padding: 1.3rem 1rem 4rem !important;
@@ -3046,6 +3327,13 @@ st.markdown(
         }
         .topbar-title {display: none;}
         .app-topbar .hero-status {width: 100%; justify-content: space-between;}
+        .dashboard-heading {align-items: flex-start; margin-top: 20px;}
+        .dashboard-heading > small {display: none;}
+        .dashboard-metric-grid {grid-template-columns: 1fr 1fr; gap: 8px;}
+        .dashboard-metric-grid article {min-height: 120px; padding: 14px;}
+        .dashboard-grid {grid-template-columns: 1fr;}
+        .dashboard-accounts {grid-column: auto;}
+        .dashboard-chart-bars {gap: 8px; padding: 20px 16px 14px;}
         .app-hero, .metric-strip, .flow-rail {
             grid-template-columns: 1fr;
         }
