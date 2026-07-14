@@ -3587,6 +3587,26 @@ st.markdown(
         line-height: 1.25rem;
         text-align: center;
     }
+    .cadence-date-add {display:block; height:1.25rem;}
+    div[data-testid="stVerticalBlock"]:has(.cadence-date-add) {
+        display:flex;
+        align-items:center;
+        justify-content:flex-end;
+        padding-top:1.24rem;
+    }
+    div[data-testid="stVerticalBlock"]:has(.cadence-date-add) [data-testid="stFormSubmitButton"] {
+        width:auto !important;
+        margin:0 !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.cadence-date-add) [data-testid="stFormSubmitButton"] button {
+        width:42px !important;
+        min-width:42px !important;
+        min-height:42px !important;
+        padding:0 !important;
+        border-radius:8px !important;
+        font-size:1.25rem !important;
+        line-height:1 !important;
+    }
     .cadence-total-card {
         min-height: 109px;
         box-sizing: border-box;
@@ -4321,7 +4341,7 @@ if active_page != "dashboard" and active_step == 1:
         with st.form("cadence_settings_form"):
             st.markdown("<span class='cadence-form-anchor'></span>", unsafe_allow_html=True)
             if st.session_state["cadence_show_end_date"]:
-                date_col, extra_date_col, start_col, end_col = st.columns([1, 1, .56, .56])
+                date_col, extra_date_col, start_col, end_col, _ = st.columns([1.08, 1.08, .36, .36, .92])
                 with date_col:
                     publish_date = st.date_input("Date de début", key="cadence_publish_date")
                 with extra_date_col:
@@ -4329,11 +4349,11 @@ if active_page != "dashboard" and active_step == 1:
                     remove_extra_date = st.form_submit_button("−", help="Retirer la date supplémentaire")
                     add_extra_date = False
             else:
-                date_col, add_col, start_col, end_col = st.columns([1.15, .18, .56, .56])
+                date_col, add_col, start_col, end_col, _ = st.columns([1.28, .1, .36, .36, 1.04])
                 with date_col:
                     publish_date = st.date_input("Date", key="cadence_publish_date")
                 with add_col:
-                    st.markdown("<div class='cadence-add-date-label'>Ajouter</div>", unsafe_allow_html=True)
+                    st.markdown("<span class='cadence-date-add'></span>", unsafe_allow_html=True)
                     publish_end_date = publish_date
                     add_extra_date = st.form_submit_button("+", help="Ajouter une autre date de publication")
                     remove_extra_date = False
@@ -4342,7 +4362,7 @@ if active_page != "dashboard" and active_step == 1:
             with end_col:
                 end_time = st.time_input("Fin", key="cadence_end_time")
 
-            posts_col, interval_col, summary_col = st.columns([1.05, .9, 1.35])
+            posts_col, interval_col, summary_col, _ = st.columns([.62, .55, 1.08, 1.35])
             with posts_col:
                 st.markdown("<div class='cadence-section-label'>Posts par compte</div>", unsafe_allow_html=True)
                 if count_mode == "Exact":
@@ -4383,7 +4403,11 @@ if active_page != "dashboard" and active_step == 1:
             # Hidden from this compact screen, but preserved for existing plans.
             avoid_same_text = bool(current.get("avoid_same_text", False))
             same_text_gap = int(current.get("same_text_gap", 60))
-            apply_cadence = st.form_submit_button("Continuer vers Posts", type="primary", use_container_width=True)
+            _, apply_col, next_col = st.columns([2.1, .7, .7])
+            with apply_col:
+                apply_cadence = st.form_submit_button("Appliquer", use_container_width=True)
+            with next_col:
+                next_step = st.form_submit_button("Suivant →", type="primary", use_container_width=True)
 
         if add_extra_date:
             st.session_state["cadence_show_end_date"] = True
@@ -4393,7 +4417,7 @@ if active_page != "dashboard" and active_step == 1:
             st.session_state["cadence_show_end_date"] = False
             st.session_state["cadence_publish_end_date"] = publish_date
             st.rerun()
-        if apply_cadence:
+        if apply_cadence or next_step:
             st.session_state["settings"] = {
                 "publish_date": publish_date,
                 "publish_end_date": publish_end_date,
@@ -4424,9 +4448,11 @@ if active_page != "dashboard" and active_step == 1:
                 caption_mode,
             )
             clear_preview_draft("Preview brouillon supprimée: cadence changée. Les posts déjà planifiés restent conservés.")
-            st.session_state["active_step"] = 2
-            st.session_state["app_page"] = "posts"
-            st.rerun()
+            if next_step:
+                st.session_state["active_step"] = 2
+                st.session_state["app_page"] = "posts"
+                st.rerun()
+            st.success("Cadence appliquée.")
         st.info(distribution_sentence(settings()))
 
 if active_page != "dashboard" and active_step == 2:
