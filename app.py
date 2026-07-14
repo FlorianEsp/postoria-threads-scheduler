@@ -1047,6 +1047,196 @@ def choose_option(
     )
 
 
+def render_post_library_workspace() -> None:
+    """Focused CRUD workspace for imported post batches."""
+    st.markdown("### Bibliothèque de posts")
+    st.caption("Le dernier CSV importé devient le lot actif et ses posts sont sélectionnés automatiquement.")
+
+    import_col, create_col = st.columns([1.25, 1])
+    with import_col:
+        uploaded_files = st.file_uploader(
+            "Importer des CSV",
+            type=["csv"],
+            accept_multiple_files=True,
+            key="library_csv_upload",
+        )
+        if st.button("Importer dans la bibliothèque", disabled=not uploaded_files, type="primary"):
+            existing_hashes = {str(batch.get("file_hash") or "") for batch in db.list_post_import_batches()}
+            latest_batch_id = ""
+            summaries = []
+            for uploaded in uploaded_files or []:
+                raw = uploaded.getvalue()
+                file_hash = hashlib.sha256(raw).hexdigest()
+                if file_hash in existing_hashes:
+                    summaries.append(f"{uploaded.name}: déjà présent")
+                    continue
+                records = make_post_records(pd.read_csv(io.BytesIO(raw)))
+                added, skipped, post_ids = db.add_posts_with_ids(records)
+                latest_batch_id = db.record_post_import_batch(
+                    uploaded.name, file_hash, len(raw), added, skipped, post_ids,
+                )
+                summaries.append(f"{uploaded.name}: {added} ajoutés")
+            if latest_batch_id:
+                latest_ids = set(db.post_ids_for_import_batch(latest_batch_id))
+                st.session_state["post_library_batch_id"] = latest_batch_id
+                st.session_state["post_import_batch_filter"] = latest_batch_id
+                st.session_state["selected_posts"] = [
+                    post for post in db.list_posts(active_only=False) if int(post["id"]) in latest_ids
+                ]
+                st.session_state["posts_selection_explicit"] = True
+                st.session_state["_selected_posts_signature"] = tuple(sorted(latest_ids))
+                st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                clear_preview_draft("Preview brouillon supprimée: nouveau CSV importé. Les posts déjà planifiés restent conservés.")
+                st.success("Dernier CSV sélectionné. " + " | ".join(summaries))
+                st.rerun()
+            if summaries and not latest_batch_id:
+                st.info(" | ".join(summaries))
+
+    with create_col:
+        with st.expander("+ Nouveau post", expanded=False):
+            with st.form("library_create_post"):
+                new_caption = st.text_area("Texte", height=110, placeholder="Écris le post ici...")
+                new_media_ids = st.text_input("Media IDs", placeholder="Optionnel")
+                create_post = st.form_submit_button("Créer le post", type="primary")
+            if create_post:
+                added, _, post_ids = db.add_posts_with_ids([{"caption": new_caption, "media_ids": new_media_ids}])
+                if not post_ids:
+                    st.warning("Ajoute un texte unique avant de créer le post.")
+                else:
+                    created_id = int(post_ids[0])
+                    created_post = next(post for post in db.list_posts(active_only=False) if int(post["id"]) == created_id)
+                    st.session_state["selected_posts"] = [created_post]
+                    st.session_state["posts_selection_explicit"] = True
+                    st.session_state["_selected_posts_signature"] = (created_id,)
+                    st.success("Post créé et sélectionné.")
+                    st.rerun()
+
+    batches = db.list_post_import_batches()
+    all_posts = db.list_posts(active_only=False)
+    if not batches and not all_posts:
+        st.info("Importe un premier CSV ou crée un post pour démarrer la bibliothèque.")
+        return
+
+    batch_col, content_col = st.columns([.8, 2.2])
+    with batch_col:
+        st.markdown("#### Lots CSV")
+        batch_ids = [str(batch["id"]) for batch in batches]
+        if batch_ids:
+            batch_options = ["all"] + batch_ids
+            default_batch = st.session_state.get("post_library_batch_id")
+            if default_batch not in batch_options:
+                default_batch = batch_ids[0]
+            batch_index = batch_options.index(default_batch)
+            active_batch_id = st.radio(
+                "Lot affiché",
+                batch_options,
+                index=batch_index,
+                key="post_library_batch_id",
+                format_func=lambda value: "Toute la bibliothèque" if value == "all" else next(
+                    f"{batch['file_name']} · {int(batch.get('linked_count') or 0)} posts"
+                    for batch in batches if str(batch["id"]) == str(value)
+                ),
+            )
+        else:
+            active_batch_id = "all"
+
+    if active_batch_id != "all":
+        visible_ids = set(db.post_ids_for_import_batch(str(active_batch_id)))
+        visible_posts = [post for post in all_posts if int(post["id"]) in visible_ids]
+    else:
+        visible_posts = all_posts
+
+    with content_col:
+        selected_ids = {int(post["id"]) for post in st.session_state.get("selected_posts", [])}
+        if not st.session_state.get("posts_selection_explicit") and visible_posts:
+            selected_ids = {int(post["id"]) for post in visible_posts if bool(post.get("is_active", 1))}
+        st.markdown(
+            f"<div class='posts-control-panel'><strong>{len(visible_posts)} posts dans cette vue</strong>"
+            f"<p>{len(selected_ids)} sélectionnés pour la prochaine preview.</p></div>",
+            unsafe_allow_html=True,
+        )
+        if not visible_posts:
+            st.info("Ce lot ne contient plus de posts actifs.")
+            return
+
+        rows = [
+            {
+                "supprimer": False,
+                "sélectionner": bool(post.get("is_active", 1)) and int(post["id"]) in selected_ids,
+                "texte": str(post.get("caption") or ""),
+                "média": media_ids_text(post.get("media_ids")),
+                "variables": variables_text(post.get("variables")),
+                "replies": "\n".join(post.get("reply_chain") or []),
+                "id": int(post["id"]),
+                "actif": bool(post.get("is_active", 1)),
+                "dossier": str(post.get("media_folder") or ""),
+                "note": str(post.get("photo_note") or ""),
+            }
+            for post in visible_posts
+        ]
+        with st.form("library_posts_form"):
+            edited = st.data_editor(
+                pd.DataFrame(rows),
+                hide_index=True,
+                use_container_width=True,
+                height=560,
+                column_order=["supprimer", "sélectionner", "texte", "média", "variables", "replies"],
+                column_config={
+                    "supprimer": st.column_config.CheckboxColumn("Supprimer", width="small"),
+                    "sélectionner": st.column_config.CheckboxColumn("Utiliser", width="small"),
+                    "texte": st.column_config.TextColumn("Texte", width="large"),
+                    "média": st.column_config.TextColumn("Média", width="medium"),
+                    "variables": st.column_config.TextColumn("Variables", width="medium"),
+                    "replies": st.column_config.TextColumn("Replies", width="medium"),
+                },
+                disabled=["id", "actif", "dossier", "note"],
+                key=f"library_posts_editor_{st.session_state.get('posts_editor_version', 0)}",
+            )
+            save_col, delete_col, next_col = st.columns([1, 1, 1])
+            save_changes = save_col.form_submit_button("Enregistrer", type="primary", use_container_width=True)
+            delete_posts = delete_col.form_submit_button("Supprimer cochés", use_container_width=True)
+            go_preview = next_col.form_submit_button("Suivant → Preview", use_container_width=True)
+
+        if delete_posts:
+            ids = [int(row["id"]) for _, row in edited.iterrows() if bool(row["supprimer"])]
+            if not ids:
+                st.warning("Coche les posts à supprimer.")
+            else:
+                result = db.delete_or_deactivate_posts(ids)
+                st.session_state["selected_posts"] = [post for post in st.session_state.get("selected_posts", []) if int(post["id"]) not in set(ids)]
+                st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                clear_preview_draft("Preview brouillon supprimée: posts retirés de la bibliothèque. Les posts déjà planifiés restent conservés.")
+                st.warning(f"{result['deleted']} supprimés. {result['deactivated']} archivés car déjà utilisés.")
+                st.rerun()
+
+        if save_changes or go_preview:
+            caption_errors = 0
+            for _, row in edited.iterrows():
+                if not db.update_post_caption(int(row["id"]), str(row["texte"])):
+                    caption_errors += 1
+                db.update_post_metadata(
+                    int(row["id"]), row["média"], row["note"], bool(row["actif"]), row["dossier"],
+                    parse_variables_text(str(row["variables"])), str(row["replies"]),
+                )
+            refreshed = {int(post["id"]): post for post in db.list_posts(active_only=False)}
+            selected = [
+                refreshed[int(row["id"])] for _, row in edited.iterrows()
+                if bool(row["sélectionner"]) and bool(row["actif"]) and int(row["id"]) in refreshed
+            ]
+            st.session_state["selected_posts"] = selected
+            st.session_state["posts_selection_explicit"] = True
+            st.session_state["_selected_posts_signature"] = tuple(sorted(int(post["id"]) for post in selected))
+            st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+            clear_preview_draft("Preview brouillon supprimée: bibliothèque modifiée. Les posts déjà planifiés restent conservés.")
+            if go_preview:
+                st.session_state["active_step"] = 3
+                st.session_state["app_page"] = "preview"
+                st.rerun()
+            if caption_errors:
+                st.warning(f"{caption_errors} texte(s) non modifiés: vide ou déjà présent.")
+            st.success(f"Bibliothèque enregistrée : {len(selected)} posts sélectionnés.")
+
+
 def widget_slug(value: str) -> str:
     return "".join(char.lower() if char.isalnum() else "_" for char in str(value or "item")).strip("_") or "item"
 
@@ -4491,6 +4681,17 @@ if active_page != "dashboard" and active_step == 2:
             f"{posts_min_required if posts_min_required == posts_max_required else f'{posts_min_required}-{posts_max_required}'} publications. "
             "Si tu sélectionnes moins de textes que nécessaire, ils tourneront en rotation."
         )
+        posts_view = st.radio(
+            "Section Posts",
+            ["Bibliothèque", "Médias"],
+            horizontal=True,
+            key="posts_workspace_view",
+            label_visibility="collapsed",
+        )
+        if posts_view == "Bibliothèque":
+            render_post_library_workspace()
+            st.stop()
+
         st.markdown("#### Dossiers média")
         folders = db.list_media_folders()
         media_col1, media_col2, media_col3 = st.columns([1, 2, 1])
@@ -4630,6 +4831,8 @@ if active_page != "dashboard" and active_step == 2:
                         st.session_state.pop("selected_photo_asset_id", None)
                         st.rerun()
 
+        # The library lives in its own view above; the media view stops here.
+        st.stop()
         st.markdown("### Bibliothèque")
         import_col, manual_col = st.columns(2)
         with import_col:
