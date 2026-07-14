@@ -3739,8 +3739,8 @@ st.markdown(
     }
     .cadence-form-anchor {display: none;}
     div[data-testid="stForm"]:has(.cadence-form-anchor) {
-        padding: 16px !important;
-        margin: 0 !important;
+        padding: 22px 24px !important;
+        margin: 14px 0 !important;
         border-radius: 12px !important;
     }
     div[data-testid="stForm"]:has(.cadence-form-anchor) [data-testid="stVerticalBlock"] {
@@ -3769,34 +3769,7 @@ st.markdown(
         font-size: .78rem;
         font-weight: 760;
     }
-    .cadence-add-date-label {
-        height: 1.25rem;
-        color: var(--faint);
-        font-size: .72rem;
-        font-weight: 700;
-        line-height: 1.25rem;
-        text-align: center;
-    }
-    .cadence-date-add {display:block; height:1.25rem;}
-    div[data-testid="stVerticalBlock"]:has(.cadence-date-add) {
-        display:flex;
-        align-items:center;
-        justify-content:flex-end;
-        padding-top:1.24rem;
-    }
-    div[data-testid="stVerticalBlock"]:has(.cadence-date-add) [data-testid="stFormSubmitButton"] {
-        width:auto !important;
-        margin:0 !important;
-    }
-    div[data-testid="stVerticalBlock"]:has(.cadence-date-add) [data-testid="stFormSubmitButton"] button {
-        width:42px !important;
-        min-width:42px !important;
-        min-height:42px !important;
-        padding:0 !important;
-        border-radius:8px !important;
-        font-size:1.25rem !important;
-        line-height:1 !important;
-    }
+    .cadence-date-add {display:block; height:1.45rem;}
     .cadence-total-card {
         min-height: 109px;
         box-sizing: border-box;
@@ -4531,7 +4504,7 @@ if active_page != "dashboard" and active_step == 1:
         with st.form("cadence_settings_form"):
             st.markdown("<span class='cadence-form-anchor'></span>", unsafe_allow_html=True)
             if st.session_state["cadence_show_end_date"]:
-                date_col, extra_date_col, start_col, end_col, _ = st.columns([1.08, 1.08, .36, .36, .92])
+                date_col, extra_date_col, start_col, end_col, _ = st.columns([1.15, 1.15, .48, .48, .6])
                 with date_col:
                     publish_date = st.date_input("Date de début", key="cadence_publish_date")
                 with extra_date_col:
@@ -4539,7 +4512,7 @@ if active_page != "dashboard" and active_step == 1:
                     remove_extra_date = st.form_submit_button("−", help="Retirer la date supplémentaire")
                     add_extra_date = False
             else:
-                date_col, add_col, start_col, end_col, _ = st.columns([1.28, .1, .36, .36, 1.04])
+                date_col, add_col, start_col, end_col, _ = st.columns([1.4, .14, .48, .48, .9])
                 with date_col:
                     publish_date = st.date_input("Date", key="cadence_publish_date")
                 with add_col:
@@ -4552,7 +4525,7 @@ if active_page != "dashboard" and active_step == 1:
             with end_col:
                 end_time = st.time_input("Fin", key="cadence_end_time")
 
-            posts_col, interval_col, summary_col, _ = st.columns([.62, .55, 1.08, 1.35])
+            posts_col, interval_col, summary_col, _ = st.columns([.9, .8, 1.25, .8])
             with posts_col:
                 st.markdown("<div class='cadence-section-label'>Posts par compte</div>", unsafe_allow_html=True)
                 if count_mode == "Exact":
