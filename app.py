@@ -1203,110 +1203,115 @@ def render_post_library_workspace() -> None:
         st.info("Ce lot ne contient plus de posts.")
         return
 
-    rows = [
-        {
-            "supprimer": False,
-            "utiliser": bool(post.get("is_active", 1)) and int(post["id"]) in selected_ids,
-            "texte": str(post.get("caption") or ""),
-            "photo": "Photo ajoutée" if media_ids_text(post.get("media_ids")) else "Aucune photo",
-            "utilisé": int(post.get("total_used") or 0),
-            "id": int(post["id"]),
-            "actif": bool(post.get("is_active", 1)),
-        }
-        for post in visible_posts
-    ]
-    editor_height = min(max(370, 48 + len(rows) * 50), 720)
     library_col, preview_col = st.columns([1.22, 0.98], gap="large")
     with library_col:
-        st.markdown("<div class='post-library-pane-title'>Bibliothèque</div>", unsafe_allow_html=True)
-        with st.form("library_posts_form"):
-            edited = st.data_editor(
-                pd.DataFrame(rows),
-                hide_index=True,
-                use_container_width=True,
-                height=editor_height,
-                num_rows="fixed",
-                column_order=["utiliser", "supprimer", "texte", "photo", "utilisé"],
-                column_config={
-                    "utiliser": st.column_config.CheckboxColumn("", width="small"),
-                    "supprimer": st.column_config.CheckboxColumn("", width="small"),
-                    "texte": st.column_config.TextColumn("Texte", width="large", required=True),
-                    "photo": st.column_config.TextColumn("Média", width="small"),
-                    "utilisé": st.column_config.NumberColumn("Utilisé", width="small", format="%d"),
-                },
-                disabled=["photo", "utilisé", "id", "actif"],
-                key=f"library_posts_editor_v3_{st.session_state.get('posts_editor_version', 0)}",
+        with st.container(border=True):
+            st.markdown(
+                "<div class='post-list-head'><span></span><span>Type</span><span>Texte</span>"
+                "<span>Média</span><span>Utilisé</span></div>",
+                unsafe_allow_html=True,
             )
-            st.caption("Première case : ajouter à la preview. Deuxième case : supprimer.")
-            save_col, delete_col = st.columns([1.1, 1])
-            save_changes = save_col.form_submit_button("Enregistrer la sélection", type="primary", use_container_width=True)
-            delete_posts = delete_col.form_submit_button("Supprimer les cochés", use_container_width=True)
+            with st.form("library_posts_form"):
+                edited_rows = []
+                for post in visible_posts:
+                    post_id = int(post["id"])
+                    row_cols = st.columns([.54, .72, 5.5, 1.2, .82], gap="small")
+                    with row_cols[0]:
+                        use_post = st.checkbox(
+                            "Utiliser",
+                            value=bool(post.get("is_active", 1)) and post_id in selected_ids,
+                            key=f"library_use_v4_{post_id}_{st.session_state.get('posts_editor_version', 0)}",
+                            label_visibility="collapsed",
+                        )
+                    with row_cols[1]:
+                        st.markdown("<div class='post-row-type'>T</div>", unsafe_allow_html=True)
+                    with row_cols[2]:
+                        st.markdown(
+                            f"<div class='post-row-caption'>{h(str(post.get('caption') or ''))}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with row_cols[3]:
+                        st.markdown(
+                            f"<div class='post-row-meta'>{'Photo' if media_ids_text(post.get('media_ids')) else '—'}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with row_cols[4]:
+                        st.markdown(
+                            f"<div class='post-row-meta'>{int(post.get('total_used') or 0)}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    st.markdown("<div class='post-row-divider'></div>", unsafe_allow_html=True)
+                    edited_rows.append(
+                        {"id": post_id, "utiliser": use_post, "actif": bool(post.get("is_active", 1))}
+                    )
+                st.caption("Coche un post pour l'ajouter à la preview. La suppression se fait depuis son aperçu.")
+                save_col, next_col = st.columns([1.05, 1.2])
+                save_changes = save_col.form_submit_button("Enregistrer la sélection", type="primary", use_container_width=True)
+                go_preview = next_col.form_submit_button("Continuer vers Preview", use_container_width=True)
 
     preview_posts = [post for post in visible_posts if int(post["id"]) in selected_ids]
     with preview_col:
-        st.markdown("<div class='post-library-pane-title'>Aperçu</div>", unsafe_allow_html=True)
-        if not preview_posts:
-            st.markdown(
-                "<div class='post-preview-empty'><div class='post-preview-symbol'>T</div>"
-                "<strong>Sélectionne un post</strong><span>Coche un texte dans la première colonne, puis enregistre.</span></div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            preview_ids = [int(post["id"]) for post in preview_posts]
-            current_preview_id = st.session_state.get("library_preview_post_id")
-            if current_preview_id not in preview_ids:
-                st.session_state["library_preview_post_id"] = preview_ids[0]
-            preview_id = st.selectbox(
-                "Post affiché",
-                preview_ids,
-                format_func=lambda post_id: next(
-                    str(post.get("caption") or "")[:54] or "Post sans texte"
-                    for post in preview_posts if int(post["id"]) == int(post_id)
-                ),
-                key="library_preview_post_id",
-            )
-            preview_post = next(post for post in preview_posts if int(post["id"]) == int(preview_id))
-            media_count = len(db.parse_media_ids(preview_post.get("media_ids")))
-            reply_count = len(preview_post.get("reply_chain") or [])
-            st.markdown(
-                "<article class='post-preview-card'>"
-                "<div class='post-preview-card-head'><span>Texte sélectionné</span>"
-                f"<b>{'Photo jointe' if media_count else 'Texte seul'}</b></div>"
-                f"<p>{h(str(preview_post.get('caption') or ''))}</p>"
-                "<div class='post-preview-card-meta'>"
-                f"<span>Utilisé {int(preview_post.get('total_used') or 0)} fois</span>"
-                f"<span>{reply_count} réponse(s)</span>"
-                "</div></article>",
-                unsafe_allow_html=True,
-            )
-
-    next_col = st.columns([1.22, 0.98], gap="large")[1]
-    with next_col:
-        go_preview = st.button("Continuer vers Preview", key="library_go_preview", type="primary", use_container_width=True)
-
-    if delete_posts:
-        ids = [int(row["id"]) for _, row in edited.iterrows() if bool(row["supprimer"])]
-        if not ids:
-            st.warning("Coche les posts à supprimer dans la colonne dédiée.")
-        else:
-            result = db.delete_or_deactivate_posts(ids)
-            removed_ids = set(ids)
-            st.session_state["selected_posts"] = [
-                post for post in st.session_state.get("selected_posts", []) if int(post["id"]) not in removed_ids
-            ]
-            st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
-            clear_preview_draft("Preview brouillon supprimée: posts retirés de la bibliothèque. Les posts déjà planifiés restent conservés.")
-            st.warning(f"{result['deleted']} supprimés. {result['deactivated']} archivés car déjà utilisés.")
-            st.rerun()
+        with st.container(border=True):
+            st.markdown("<div class='post-preview-pane-title'>Aperçu du post</div>", unsafe_allow_html=True)
+            if not preview_posts:
+                st.markdown(
+                    "<div class='post-preview-empty'><div class='post-preview-symbol'>T</div>"
+                    "<strong>Sélectionne un post</strong><span>Coche un texte dans la première colonne, puis enregistre.</span></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                preview_ids = [int(post["id"]) for post in preview_posts]
+                current_preview_id = st.session_state.get("library_preview_post_id")
+                if current_preview_id not in preview_ids:
+                    st.session_state["library_preview_post_id"] = preview_ids[0]
+                preview_id = st.selectbox(
+                    "Post affiché",
+                    preview_ids,
+                    format_func=lambda post_id: next(
+                        str(post.get("caption") or "")[:54] or "Post sans texte"
+                        for post in preview_posts if int(post["id"]) == int(post_id)
+                    ),
+                    key="library_preview_post_id",
+                )
+                preview_post = next(post for post in preview_posts if int(post["id"]) == int(preview_id))
+                media_count = len(db.parse_media_ids(preview_post.get("media_ids")))
+                reply_count = len(preview_post.get("reply_chain") or [])
+                st.markdown(
+                    "<article class='post-preview-card'>"
+                    "<div class='post-preview-card-head'><span>Texte sélectionné</span>"
+                    f"<b>{'Photo jointe' if media_count else 'Texte seul'}</b></div>"
+                    f"<p>{h(str(preview_post.get('caption') or ''))}</p>"
+                    "<div class='post-preview-card-meta'>"
+                    f"<span>Utilisé {int(preview_post.get('total_used') or 0)} fois</span>"
+                    f"<span>{reply_count} réponse(s)</span>"
+                    "</div></article>",
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Modifier ou supprimer ce post", expanded=False):
+                    with st.form(f"library_edit_post_{preview_id}"):
+                        revised_caption = st.text_area("Texte du post", value=str(preview_post.get("caption") or ""), height=150)
+                        save_post = st.form_submit_button("Enregistrer le texte", type="primary")
+                    if save_post:
+                        if not db.update_post_caption(int(preview_id), revised_caption):
+                            st.warning("Le texte doit être rempli et unique.")
+                        else:
+                            st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                            clear_preview_draft("Preview brouillon supprimée: texte modifié. Les posts déjà planifiés restent conservés.")
+                            st.rerun()
+                    if st.button("Supprimer ce post", key=f"library_delete_post_{preview_id}"):
+                        result = db.delete_or_deactivate_posts([int(preview_id)])
+                        st.session_state["selected_posts"] = [
+                            post for post in st.session_state.get("selected_posts", []) if int(post["id"]) != int(preview_id)
+                        ]
+                        st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+                        clear_preview_draft("Preview brouillon supprimée: post retiré de la bibliothèque. Les posts déjà planifiés restent conservés.")
+                        st.warning(f"{result['deleted']} supprimé. {result['deactivated']} archivé car déjà utilisé.")
+                        st.rerun()
 
     if save_changes or go_preview:
-        caption_errors = 0
-        for _, row in edited.iterrows():
-            if not db.update_post_caption(int(row["id"]), str(row["texte"])):
-                caption_errors += 1
         refreshed = {int(post["id"]): post for post in db.list_posts(active_only=False)}
         selected = [
-            refreshed[int(row["id"])] for _, row in edited.iterrows()
+            refreshed[int(row["id"])] for row in edited_rows
             if bool(row["utiliser"]) and bool(row["actif"]) and int(row["id"]) in refreshed
         ]
         st.session_state["selected_posts"] = selected
@@ -1318,8 +1323,6 @@ def render_post_library_workspace() -> None:
             st.session_state["active_step"] = 3
             st.session_state["app_page"] = "preview"
             st.rerun()
-        if caption_errors:
-            st.warning(f"{caption_errors} texte(s) non modifiés: vide ou déjà présent.")
         st.success(f"Bibliothèque enregistrée : {len(selected)} posts sélectionnés.")
 
 
@@ -2501,7 +2504,8 @@ st.markdown(
         font-size: .82rem;
         margin-top: 2px;
     }
-    .post-library-pane-title {
+    .post-library-pane-title,
+    .post-preview-pane-title {
         color: var(--faint);
         font-size: .73rem;
         font-weight: 820;
@@ -2511,13 +2515,59 @@ st.markdown(
         border-bottom: 1px solid var(--line);
         margin-bottom: 0;
     }
+    .post-list-head {
+        display: grid;
+        grid-template-columns: .54fr .72fr 5.5fr 1.2fr .82fr;
+        gap: 8px;
+        align-items: center;
+        min-height: 36px;
+        padding: 0 5px 9px;
+        border-bottom: 1px solid var(--line);
+        color: var(--faint);
+        font-size: .71rem;
+        font-weight: 820;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+    .post-row-type {
+        width: 42px;
+        height: 42px;
+        display: grid;
+        place-items: center;
+        border-radius: 9px;
+        background: rgba(9, 9, 11, .56);
+        color: var(--muted);
+        font-size: 1rem;
+        font-weight: 760;
+    }
+    .post-row-caption {
+        min-height: 42px;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        overflow: hidden;
+        color: var(--text);
+        font-weight: 650;
+        line-height: 1.42;
+        padding-top: 5px;
+    }
+    .post-row-meta {
+        min-height: 42px;
+        display: flex;
+        align-items: center;
+        color: var(--muted);
+        font-size: .84rem;
+        font-variant-numeric: tabular-nums;
+    }
+    .post-row-divider {
+        height: 1px;
+        margin: 0 -1rem;
+        background: var(--line);
+    }
     .post-preview-empty,
     .post-preview-card {
-        min-height: 370px;
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        background: rgba(24, 24, 27, .68);
-        padding: 28px;
+        min-height: 650px;
+        padding: 28px 24px;
     }
     .post-preview-empty {
         display: flex;
