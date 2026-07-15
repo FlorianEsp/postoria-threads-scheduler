@@ -554,6 +554,47 @@ def upsert_accounts(accounts: list[dict[str, Any]]) -> None:
             )
 
 
+def sync_accounts(accounts: list[dict[str, Any]]) -> dict[str, int]:
+    """Make the local account list match the currently selected Postoria workspace."""
+    incoming_ids = sorted({int(account["id"]) for account in accounts if account.get("id") is not None})
+    with connect() as conn:
+        existing_ids = {
+            int(row["id"])
+            for row in conn.execute("SELECT id FROM accounts").fetchall()
+        }
+        for account in accounts:
+            account_id = int(account["id"])
+            username = _pick_first(account, ("username", "handle", "slug", "provider_username"))
+            avatar_url = _pick_first(account, ("avatar_url", "profile_picture_url", "picture", "image_url", "photo_url"))
+            conn.execute(
+                """
+                INSERT INTO accounts (id, name, network, url, username, avatar_url)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    network=excluded.network,
+                    url=excluded.url,
+                    username=COALESCE(excluded.username, accounts.username),
+                    avatar_url=COALESCE(excluded.avatar_url, accounts.avatar_url)
+                """,
+                (
+                    account_id,
+                    account.get("name", ""),
+                    account.get("network", ""),
+                    account.get("url"),
+                    username,
+                    avatar_url,
+                ),
+            )
+        if incoming_ids:
+            placeholders = ", ".join("?" for _ in incoming_ids)
+            conn.execute(f"DELETE FROM accounts WHERE id NOT IN ({placeholders})", incoming_ids)
+        else:
+            conn.execute("DELETE FROM accounts")
+    removed = len(existing_ids - set(incoming_ids))
+    return {"synced": len(incoming_ids), "removed": removed}
+
+
 def update_account_preferences(account_id: int, group_name: str, active_for_day: bool, selected_for_schedule: bool) -> None:
     clean_group = str(group_name or "tous").strip()
     with connect() as conn:

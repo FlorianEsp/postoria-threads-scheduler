@@ -206,6 +206,21 @@ def restore_account_selection_from_db(accounts: list[dict]) -> None:
     st.session_state["_accounts_restored_from_db"] = True
 
 
+def reset_account_session_after_sync(accounts: list[dict]) -> None:
+    """Discard account selection widgets that may still refer to removed remote accounts."""
+    for key in list(st.session_state):
+        if key.startswith(("account_group_", "account_use_", "account_status_enabled_v2_")):
+            del st.session_state[key]
+    st.session_state["threads_accounts"] = accounts
+    st.session_state["selected_accounts"] = []
+    st.session_state["grouped_accounts"] = {}
+    st.session_state["selected_group_filters"] = []
+    st.session_state["manual_included_accounts"] = []
+    st.session_state["manual_excluded_accounts"] = []
+    st.session_state.pop("_account_group_signature", None)
+    st.session_state.pop("_accounts_restored_from_db", None)
+
+
 def preview_dataframe(rows: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if df.empty:
@@ -4423,9 +4438,12 @@ if active_page != "dashboard" and active_step == 0:
                         try:
                             accounts = client.list_social_accounts(int(workspace_id))
                             threads_accounts = [a for a in accounts if str(a.get("network", "")).lower() == "threads"]
-                            db.upsert_accounts(threads_accounts)
-                            st.session_state["threads_accounts"] = db.list_accounts()
-                            st.success(f"{len(threads_accounts)} comptes Threads trouvés.")
+                            sync_result = db.sync_accounts(threads_accounts)
+                            fresh_accounts = db.list_accounts()
+                            reset_account_session_after_sync(fresh_accounts)
+                            removed_message = f" {sync_result['removed']} ancien(s) compte(s) retiré(s)." if sync_result["removed"] else ""
+                            st.success(f"{sync_result['synced']} comptes Threads synchronisés.{removed_message}")
+                            st.rerun()
                         except Exception as e:
                             st.error(str(e))
 
