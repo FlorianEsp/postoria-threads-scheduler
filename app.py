@@ -1209,34 +1209,80 @@ def render_post_library_workspace() -> None:
             "utiliser": bool(post.get("is_active", 1)) and int(post["id"]) in selected_ids,
             "texte": str(post.get("caption") or ""),
             "photo": "Photo ajoutée" if media_ids_text(post.get("media_ids")) else "Aucune photo",
+            "utilisé": int(post.get("total_used") or 0),
             "id": int(post["id"]),
             "actif": bool(post.get("is_active", 1)),
         }
         for post in visible_posts
     ]
-    editor_height = min(max(228, 48 + len(rows) * 48), 620)
-    with st.form("library_posts_form"):
-        edited = st.data_editor(
-            pd.DataFrame(rows),
-            hide_index=True,
-            use_container_width=True,
-            height=editor_height,
-            num_rows="fixed",
-            column_order=["utiliser", "supprimer", "texte", "photo"],
-            column_config={
-                "utiliser": st.column_config.CheckboxColumn("Utiliser", width="small"),
-                "supprimer": st.column_config.CheckboxColumn("Supprimer", width="small"),
-                "texte": st.column_config.TextColumn("Texte du post", width="large", required=True),
-                "photo": st.column_config.TextColumn("Photo", width="medium"),
-            },
-            disabled=["photo", "id", "actif"],
-            key=f"library_posts_editor_v2_{st.session_state.get('posts_editor_version', 0)}",
-        )
-        st.caption("Modifie directement un texte dans le tableau. Les détails média restent disponibles dans l'onglet Médias.")
-        save_col, delete_col, next_col = st.columns([1.05, 1, 1.35])
-        save_changes = save_col.form_submit_button("Enregistrer", type="primary", use_container_width=True)
-        delete_posts = delete_col.form_submit_button("Supprimer les cochés", use_container_width=True)
-        go_preview = next_col.form_submit_button("Continuer vers Preview", use_container_width=True)
+    editor_height = min(max(370, 48 + len(rows) * 50), 720)
+    library_col, preview_col = st.columns([1.22, 0.98], gap="large")
+    with library_col:
+        st.markdown("<div class='post-library-pane-title'>Bibliothèque</div>", unsafe_allow_html=True)
+        with st.form("library_posts_form"):
+            edited = st.data_editor(
+                pd.DataFrame(rows),
+                hide_index=True,
+                use_container_width=True,
+                height=editor_height,
+                num_rows="fixed",
+                column_order=["utiliser", "supprimer", "texte", "photo", "utilisé"],
+                column_config={
+                    "utiliser": st.column_config.CheckboxColumn("", width="small"),
+                    "supprimer": st.column_config.CheckboxColumn("", width="small"),
+                    "texte": st.column_config.TextColumn("Texte", width="large", required=True),
+                    "photo": st.column_config.TextColumn("Média", width="small"),
+                    "utilisé": st.column_config.NumberColumn("Utilisé", width="small", format="%d"),
+                },
+                disabled=["photo", "utilisé", "id", "actif"],
+                key=f"library_posts_editor_v3_{st.session_state.get('posts_editor_version', 0)}",
+            )
+            st.caption("Première case : ajouter à la preview. Deuxième case : supprimer.")
+            save_col, delete_col = st.columns([1.1, 1])
+            save_changes = save_col.form_submit_button("Enregistrer la sélection", type="primary", use_container_width=True)
+            delete_posts = delete_col.form_submit_button("Supprimer les cochés", use_container_width=True)
+
+    preview_posts = [post for post in visible_posts if int(post["id"]) in selected_ids]
+    with preview_col:
+        st.markdown("<div class='post-library-pane-title'>Aperçu</div>", unsafe_allow_html=True)
+        if not preview_posts:
+            st.markdown(
+                "<div class='post-preview-empty'><div class='post-preview-symbol'>T</div>"
+                "<strong>Sélectionne un post</strong><span>Coche un texte dans la première colonne, puis enregistre.</span></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            preview_ids = [int(post["id"]) for post in preview_posts]
+            current_preview_id = st.session_state.get("library_preview_post_id")
+            if current_preview_id not in preview_ids:
+                st.session_state["library_preview_post_id"] = preview_ids[0]
+            preview_id = st.selectbox(
+                "Post affiché",
+                preview_ids,
+                format_func=lambda post_id: next(
+                    str(post.get("caption") or "")[:54] or "Post sans texte"
+                    for post in preview_posts if int(post["id"]) == int(post_id)
+                ),
+                key="library_preview_post_id",
+            )
+            preview_post = next(post for post in preview_posts if int(post["id"]) == int(preview_id))
+            media_count = len(db.parse_media_ids(preview_post.get("media_ids")))
+            reply_count = len(preview_post.get("reply_chain") or [])
+            st.markdown(
+                "<article class='post-preview-card'>"
+                "<div class='post-preview-card-head'><span>Texte sélectionné</span>"
+                f"<b>{'Photo jointe' if media_count else 'Texte seul'}</b></div>"
+                f"<p>{h(str(preview_post.get('caption') or ''))}</p>"
+                "<div class='post-preview-card-meta'>"
+                f"<span>Utilisé {int(preview_post.get('total_used') or 0)} fois</span>"
+                f"<span>{reply_count} réponse(s)</span>"
+                "</div></article>",
+                unsafe_allow_html=True,
+            )
+
+    next_col = st.columns([1.22, 0.98], gap="large")[1]
+    with next_col:
+        go_preview = st.button("Continuer vers Preview", key="library_go_preview", type="primary", use_container_width=True)
 
     if delete_posts:
         ids = [int(row["id"]) for _, row in edited.iterrows() if bool(row["supprimer"])]
@@ -2454,6 +2500,97 @@ st.markdown(
         color: var(--muted);
         font-size: .82rem;
         margin-top: 2px;
+    }
+    .post-library-pane-title {
+        color: var(--faint);
+        font-size: .73rem;
+        font-weight: 820;
+        letter-spacing: .09em;
+        text-transform: uppercase;
+        padding: 0 0 9px;
+        border-bottom: 1px solid var(--line);
+        margin-bottom: 0;
+    }
+    .post-preview-empty,
+    .post-preview-card {
+        min-height: 370px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(24, 24, 27, .68);
+        padding: 28px;
+    }
+    .post-preview-empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        gap: 8px;
+    }
+    .post-preview-symbol {
+        width: 52px;
+        height: 52px;
+        display: grid;
+        place-items: center;
+        border-radius: 12px;
+        background: rgba(244, 63, 94, .10);
+        color: var(--accent);
+        font-size: 1.25rem;
+        font-weight: 780;
+        margin-bottom: 5px;
+    }
+    .post-preview-empty strong {
+        color: var(--text);
+        font-size: 1.05rem;
+    }
+    .post-preview-empty span {
+        max-width: 280px;
+        color: var(--muted);
+        line-height: 1.5;
+    }
+    .post-preview-card {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+    }
+    .post-preview-card-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+    }
+    .post-preview-card-head span {
+        color: var(--faint);
+        font-size: .72rem;
+        font-weight: 820;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+    .post-preview-card-head b {
+        color: var(--accent);
+        background: rgba(244, 63, 94, .10);
+        padding: 5px 8px;
+        border-radius: 6px;
+        font-size: .76rem;
+        font-weight: 720;
+    }
+    .post-preview-card p {
+        margin: 4px 0 auto;
+        white-space: pre-wrap;
+        color: var(--text);
+        font-size: 1.04rem;
+        line-height: 1.62;
+    }
+    .post-preview-card-meta {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        padding-top: 15px;
+        border-top: 1px solid var(--line);
+    }
+    .post-preview-card-meta span {
+        color: var(--muted);
+        font-size: .82rem;
     }
     div[data-testid="stDataFrame"]:has([aria-label*="Texte du post"]),
     div[data-testid="stDataFrameResizable"]:has([aria-label*="Texte du post"]) {
