@@ -1066,6 +1066,11 @@ def render_post_library_workspace() -> None:
     """Readable CRUD workspace for imported post batches."""
     batches = db.list_post_import_batches()
     all_posts = db.list_posts(active_only=False)
+    if not st.session_state.get("post_library_selection_defaults_v2"):
+        st.session_state["selected_posts"] = []
+        st.session_state["posts_selection_explicit"] = True
+        st.session_state["_selected_posts_signature"] = tuple()
+        st.session_state["post_library_selection_defaults_v2"] = True
 
     st.markdown(
         "<div class='post-library-header'><div><span>Bibliothèque</span><h3>Posts</h3>"
@@ -1086,6 +1091,7 @@ def render_post_library_workspace() -> None:
             if st.button("Importer", disabled=not uploaded_files, type="primary", key="library_import_csv"):
                 existing_hashes = {str(batch.get("file_hash") or "") for batch in db.list_post_import_batches()}
                 latest_batch_id = ""
+                imported_post_ids: set[int] = set()
                 summaries = []
                 for uploaded in uploaded_files or []:
                     raw = uploaded.getvalue()
@@ -1098,16 +1104,18 @@ def render_post_library_workspace() -> None:
                     latest_batch_id = db.record_post_import_batch(
                         uploaded.name, file_hash, len(raw), added, skipped, post_ids,
                     )
+                    imported_post_ids.update(int(post_id) for post_id in post_ids)
                     summaries.append(f"{uploaded.name}: {added} ajoutés")
                 if latest_batch_id:
-                    latest_ids = set(db.post_ids_for_import_batch(latest_batch_id))
                     st.session_state["post_library_batch_id"] = latest_batch_id
                     st.session_state["post_import_batch_filter"] = latest_batch_id
+                    previous_ids = {int(post["id"]) for post in st.session_state.get("selected_posts", [])}
+                    selected_ids = previous_ids | imported_post_ids
                     st.session_state["selected_posts"] = [
-                        post for post in db.list_posts(active_only=False) if int(post["id"]) in latest_ids
+                        post for post in db.list_posts(active_only=False) if int(post["id"]) in selected_ids
                     ]
                     st.session_state["posts_selection_explicit"] = True
-                    st.session_state["_selected_posts_signature"] = tuple(sorted(latest_ids))
+                    st.session_state["_selected_posts_signature"] = tuple(sorted(selected_ids))
                     st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
                     clear_preview_draft("Preview brouillon supprimée: nouveau CSV importé. Les posts déjà planifiés restent conservés.")
                     st.success("Dernier CSV sélectionné. " + " | ".join(summaries))
@@ -1127,11 +1135,11 @@ def render_post_library_workspace() -> None:
                     st.warning("Ajoute un texte unique avant de créer le post.")
                 else:
                     created_id = int(post_ids[0])
-                    created_post = next(post for post in db.list_posts(active_only=False) if int(post["id"]) == created_id)
-                    st.session_state["selected_posts"] = [created_post]
                     st.session_state["posts_selection_explicit"] = True
-                    st.session_state["_selected_posts_signature"] = (created_id,)
-                    st.success("Post créé et sélectionné.")
+                    st.session_state["_selected_posts_signature"] = tuple(
+                        sorted(int(post["id"]) for post in st.session_state.get("selected_posts", []))
+                    )
+                    st.success("Post créé. Il n'est pas sélectionné par défaut.")
                     st.rerun()
 
     if not batches and not all_posts:
@@ -1144,49 +1152,51 @@ def render_post_library_workspace() -> None:
         active_batch_id = batch_ids[0] if batch_ids else "all"
         st.session_state["post_library_batch_id"] = active_batch_id
 
+    selected_ids = {int(post["id"]) for post in st.session_state.get("selected_posts", [])}
+    post_by_id = {int(post["id"]): post for post in all_posts}
+
+    def persist_selection(next_ids: set[int]) -> None:
+        clean_ids = {int(post_id) for post_id in next_ids if int(post_id) in post_by_id}
+        st.session_state["selected_posts"] = [post_by_id[post_id] for post_id in sorted(clean_ids)]
+        st.session_state["posts_selection_explicit"] = True
+        st.session_state["_selected_posts_signature"] = tuple(sorted(clean_ids))
+        st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+
     def batch_name(batch_id: str) -> str:
         if batch_id == "all":
-            return "Toute la bibliothèque"
+            return f"Tous les posts · {len(selected_ids)} cochés"
         batch = next((item for item in batches if str(item["id"]) == str(batch_id)), None)
         if not batch:
             return "Lot introuvable"
-        return f"{batch['file_name']} · {int(batch.get('linked_count') or 0)} posts"
+        batch_post_ids = set(db.post_ids_for_import_batch(str(batch_id)))
+        return (
+            f"{batch['file_name']} · {int(batch.get('linked_count') or 0)} posts"
+            f" · {len(batch_post_ids & selected_ids)} cochés"
+        )
 
-    st.markdown("<div class='post-batch-toolbar'>", unsafe_allow_html=True)
-    batch_title_col, all_col, latest_col, browse_col = st.columns([2.2, 1, 1.35, 1.4])
-    with batch_title_col:
-        st.markdown(f"<div class='post-batch-state'><span>Lot affiché</span><strong>{h(batch_name(active_batch_id))}</strong></div>", unsafe_allow_html=True)
-    with all_col:
-        if st.button("Tous", key="library_show_all", use_container_width=True):
-            st.session_state["post_library_batch_id"] = "all"
+    batch_picker_col, batch_info_col = st.columns([1.45, 2.55])
+    with batch_picker_col:
+        picked_batch_id = st.selectbox(
+            "CSV affiché",
+            ["all", *batch_ids],
+            index=["all", *batch_ids].index(active_batch_id),
+            format_func=batch_name,
+            key="library_batch_picker_v2",
+        )
+        if str(picked_batch_id) != active_batch_id:
+            st.session_state["post_library_batch_id"] = str(picked_batch_id)
             st.rerun()
-    with latest_col:
-        if batches and st.button("Dernier import", key="library_show_latest", use_container_width=True):
-            st.session_state["post_library_batch_id"] = batch_ids[0]
-            st.rerun()
-    with browse_col:
-        if batches:
-            with st.expander("Autre import", expanded=False):
-                picked_batch_id = st.selectbox(
-                    "Choisir un import",
-                    batch_ids,
-                    format_func=batch_name,
-                    key="library_batch_picker",
-                )
-                if st.button("Afficher ce lot", key="library_show_picked", use_container_width=True):
-                    st.session_state["post_library_batch_id"] = str(picked_batch_id)
-                    st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+    with batch_info_col:
+        st.markdown(
+            f"<div class='post-batch-state'><span>État enregistré</span><strong>{h(batch_name(active_batch_id))}</strong></div>",
+            unsafe_allow_html=True,
+        )
 
     if active_batch_id != "all":
         visible_ids = set(db.post_ids_for_import_batch(active_batch_id))
         visible_posts = [post for post in all_posts if int(post["id"]) in visible_ids]
     else:
         visible_posts = all_posts
-
-    selected_ids = {int(post["id"]) for post in st.session_state.get("selected_posts", [])}
-    if not st.session_state.get("posts_selection_explicit") and visible_posts:
-        selected_ids = {int(post["id"]) for post in visible_posts if bool(post.get("is_active", 1))}
 
     tools_col, select_all_col, select_none_col = st.columns([2.2, 1, 1])
     with tools_col:
@@ -1196,22 +1206,18 @@ def render_post_library_workspace() -> None:
             unsafe_allow_html=True,
         )
     with select_all_col:
-        if st.button("Tout sélectionner", key="library_select_all", use_container_width=True):
-            refreshed = {int(post["id"]): post for post in db.list_posts(active_only=False)}
-            st.session_state["selected_posts"] = [
-                refreshed[int(post["id"])] for post in visible_posts
-                if bool(post.get("is_active", 1)) and int(post["id"]) in refreshed
-            ]
-            st.session_state["posts_selection_explicit"] = True
-            st.session_state["_selected_posts_signature"] = tuple(sorted(int(post["id"]) for post in st.session_state["selected_posts"]))
-            st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+        if active_batch_id != "all" and st.button("Cocher ce CSV", key="library_select_batch", use_container_width=True):
+            batch_ids_to_add = {int(post["id"]) for post in visible_posts if bool(post.get("is_active", 1))}
+            persist_selection(selected_ids | batch_ids_to_add)
             st.rerun()
     with select_none_col:
-        if st.button("Tout retirer", key="library_select_none", use_container_width=True):
-            st.session_state["selected_posts"] = []
-            st.session_state["posts_selection_explicit"] = True
-            st.session_state["_selected_posts_signature"] = tuple()
-            st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+        remove_label = "Tout décocher" if active_batch_id == "all" else "Décocher ce CSV"
+        if st.button(remove_label, key="library_select_none", use_container_width=True):
+            if active_batch_id == "all":
+                persist_selection(set())
+            else:
+                batch_ids_to_remove = {int(post["id"]) for post in visible_posts}
+                persist_selection(selected_ids - batch_ids_to_remove)
             st.rerun()
 
     if not visible_posts:
@@ -1324,21 +1330,18 @@ def render_post_library_workspace() -> None:
                         st.rerun()
 
     if save_changes or go_preview:
-        refreshed = {int(post["id"]): post for post in db.list_posts(active_only=False)}
-        selected = [
-            refreshed[int(row["id"])] for row in edited_rows
-            if bool(row["utiliser"]) and bool(row["actif"]) and int(row["id"]) in refreshed
-        ]
-        st.session_state["selected_posts"] = selected
-        st.session_state["posts_selection_explicit"] = True
-        st.session_state["_selected_posts_signature"] = tuple(sorted(int(post["id"]) for post in selected))
-        st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+        visible_ids = {int(post["id"]) for post in visible_posts}
+        newly_checked_ids = {
+            int(row["id"]) for row in edited_rows
+            if bool(row["utiliser"]) and bool(row["actif"])
+        }
+        persist_selection((selected_ids - visible_ids) | newly_checked_ids)
         clear_preview_draft("Preview brouillon supprimée: bibliothèque modifiée. Les posts déjà planifiés restent conservés.")
         if go_preview:
             st.session_state["active_step"] = 3
             st.session_state["app_page"] = "preview"
             st.rerun()
-        st.success(f"Bibliothèque enregistrée : {len(selected)} posts sélectionnés.")
+        st.success(f"Bibliothèque enregistrée : {len((selected_ids - visible_ids) | newly_checked_ids)} posts sélectionnés.")
 
 
 def widget_slug(value: str) -> str:
