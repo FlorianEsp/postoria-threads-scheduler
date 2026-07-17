@@ -136,6 +136,43 @@ def make_post_records(frame: pd.DataFrame) -> list[dict]:
     return records
 
 
+def parse_post_csv(raw: bytes, file_name: str) -> list[dict]:
+    """Read a small text-post CSV defensively before inserting it into the library."""
+    max_bytes = 5 * 1024 * 1024
+    max_rows = 5_000
+    clean_name = str(file_name or "le CSV")
+    if not raw:
+        raise ValueError(f"{clean_name} est vide.")
+    if len(raw) > max_bytes:
+        raise ValueError(f"{clean_name} dépasse 5 Mo. Découpe-le en plusieurs CSV plus petits.")
+
+    frame: pd.DataFrame | None = None
+    parse_error: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            frame = pd.read_csv(
+                io.BytesIO(raw),
+                encoding=encoding,
+                dtype=object,
+                keep_default_na=False,
+            )
+            break
+        except (UnicodeDecodeError, pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+            parse_error = exc
+
+    if frame is None:
+        raise ValueError(f"Impossible de lire {clean_name}. Vérifie que le fichier est bien un CSV.") from parse_error
+    if frame.empty:
+        raise ValueError(f"{clean_name} ne contient aucun post.")
+    if len(frame.index) > max_rows:
+        raise ValueError(f"{clean_name} contient plus de {max_rows:,} lignes. Découpe-le avant l'import.")
+
+    records = make_post_records(frame)
+    if not any(str(record.get("caption") or "").strip() for record in records):
+        raise ValueError(f"{clean_name} doit avoir une colonne text ou caption avec au moins un texte.")
+    return records
+
+
 def parse_variables_text(value: str) -> dict:
     data: dict[str, str] = {}
     for part in str(value or "").replace("\n", ",").split(","):
@@ -1201,6 +1238,15 @@ def render_post_library_workspace() -> None:
         current_batch_ids = batch_post_ids(active_batch_id)
         visible_posts = [post for post in all_posts if int(post["id"]) in current_batch_ids]
 
+    import_notice = str(st.session_state.pop("post_library_import_notice", "") or "").strip()
+    page_size = 24
+    page_key = f"post_library_page_{active_batch_id}"
+    page_count = max(1, (len(visible_posts) + page_size - 1) // page_size)
+    current_page = max(1, min(int(st.session_state.get(page_key, 1) or 1), page_count))
+    st.session_state[page_key] = current_page
+    page_start = (current_page - 1) * page_size
+    page_posts = visible_posts[page_start:page_start + page_size]
+
     st.markdown(
         "<div class='post-library-workspace'></div>"
         "<div class='post-library-header'><div><span>Bibliothèque</span><h3>Posts</h3>"
@@ -1208,8 +1254,10 @@ def render_post_library_workspace() -> None:
         f"<b>{len(selected_ids)} sélectionné(s)</b></div>",
         unsafe_allow_html=True,
     )
+    if import_notice:
+        st.success(import_notice)
 
-    finder_col, list_col, preview_col = st.columns([1.0, 1.9, 1.35], gap="large")
+    finder_col, list_col, preview_col = st.columns([1.25, 2.05, 1.45], gap="large")
     with finder_col:
         with st.container(border=True):
             st.markdown("<div class='post-library-finder-title'>BIBLIOTHÈQUE</div>", unsafe_allow_html=True)
@@ -1225,26 +1273,35 @@ def render_post_library_workspace() -> None:
                     existing_hashes = {str(batch.get("file_hash") or "") for batch in db.list_post_import_batches()}
                     latest_batch_id = ""
                     imported_post_ids: set[int] = set()
-                    summaries = []
-                    for uploaded in uploaded_files or []:
-                        raw = uploaded.getvalue()
-                        file_hash = hashlib.sha256(raw).hexdigest()
-                        if file_hash in existing_hashes:
-                            summaries.append(f"{uploaded.name}: déjà présent")
-                            continue
-                        records = make_post_records(pd.read_csv(io.BytesIO(raw)))
-                        added, skipped, post_ids = db.add_posts_with_ids(records)
-                        latest_batch_id = db.record_post_import_batch(
-                            uploaded.name, file_hash, len(raw), added, skipped, post_ids,
-                        )
-                        imported_post_ids.update(int(post_id) for post_id in post_ids)
-                        summaries.append(f"{uploaded.name}: {added} ajoutés")
+                    summaries: list[str] = []
+                    errors: list[str] = []
+                    with st.spinner("Import des CSV en cours..."):
+                        for uploaded in uploaded_files or []:
+                            raw = uploaded.getvalue()
+                            file_hash = hashlib.sha256(raw).hexdigest()
+                            if file_hash in existing_hashes:
+                                summaries.append(f"{uploaded.name}: déjà présent")
+                                continue
+                            try:
+                                records = parse_post_csv(raw, uploaded.name)
+                                added, skipped, post_ids = db.add_posts_with_ids(records)
+                                latest_batch_id = db.record_post_import_batch(
+                                    uploaded.name, file_hash, len(raw), added, skipped, post_ids,
+                                )
+                                imported_post_ids.update(int(post_id) for post_id in post_ids)
+                                summaries.append(f"{uploaded.name}: {added} ajoutés, {skipped} ignorés")
+                            except (OSError, ValueError, pd.errors.ParserError) as exc:
+                                errors.append(f"{uploaded.name}: {exc}")
                     if latest_batch_id:
                         st.session_state["post_library_batch_id"] = latest_batch_id
                         st.session_state["post_import_batch_filter"] = latest_batch_id
                         persist_selection(selected_ids | imported_post_ids)
-                        st.success(" | ".join(summaries))
+                        st.session_state["post_library_import_notice"] = " | ".join(summaries)
+                        if errors:
+                            st.session_state["post_library_import_notice"] += f". {len(errors)} fichier(s) non importé(s)."
                         st.rerun()
+                    if errors:
+                        st.error(" | ".join(errors))
                     if summaries and not latest_batch_id:
                         st.info(" | ".join(summaries))
 
@@ -1280,14 +1337,15 @@ def render_post_library_workspace() -> None:
         with st.container(border=True):
             st.markdown(
                 "<div class='post-library-list-title'><div><span>POSTS</span>"
-                f"<strong>{len(visible_posts)} affiché(s)</strong></div>"
+                f"<strong>{len(visible_posts)} post(s)</strong></div>"
                 f"<b>{len(selected_ids)} pour la preview</b></div>",
                 unsafe_allow_html=True,
             )
-            action_a, action_b, action_c = st.columns([1, 1, 1.15], gap="small")
+            action_a, action_b, action_c = st.columns([1.05, 1.2, 1.65], gap="small")
             visible_ids = {int(post["id"]) for post in visible_posts if bool(post.get("is_active", 1))}
             with action_a:
-                if active_batch_id not in {"all", "favorites"} and st.button("Cocher ce CSV", key="library_select_batch", use_container_width=True):
+                select_label = "Cocher ce CSV" if active_batch_id not in {"all", "favorites"} else "Cocher la vue"
+                if st.button(select_label, key="library_select_batch", use_container_width=True):
                     persist_selection(selected_ids | visible_ids)
                     st.rerun()
             with action_b:
@@ -1304,12 +1362,31 @@ def render_post_library_workspace() -> None:
                         st.session_state["app_page"] = "preview"
                         st.rerun()
 
+            page_label = (
+                "Aucun post" if not visible_posts
+                else f"{page_start + 1}-{min(page_start + page_size, len(visible_posts))} sur {len(visible_posts)}"
+            )
+            page_prev, page_info, page_next = st.columns([1, 2.4, 1], gap="small")
+            with page_prev:
+                if st.button("Précédent", key=f"library_page_previous_{active_batch_id}", disabled=current_page <= 1, use_container_width=True):
+                    st.session_state[page_key] = current_page - 1
+                    st.rerun()
+            with page_info:
+                st.markdown(
+                    f"<div class='post-library-page-info'>{page_label}</div>",
+                    unsafe_allow_html=True,
+                )
+            with page_next:
+                if st.button("Suivant", key=f"library_page_next_{active_batch_id}", disabled=current_page >= page_count, use_container_width=True):
+                    st.session_state[page_key] = current_page + 1
+                    st.rerun()
+
             st.markdown("<div class='post-list-head post-list-head-new'><span></span><span>POST</span><span>MÉDIA</span><span>UTILISÉ</span><span></span></div>", unsafe_allow_html=True)
             with st.container(height=640, border=False):
                 if not visible_posts:
                     st.markdown("<div class='post-library-empty'>Aucun post dans cette vue.</div>", unsafe_allow_html=True)
                 else:
-                    for post in visible_posts:
+                    for post in page_posts:
                         post_id = int(post["id"])
                         selection_key = f"library_selected_{post_id}_{st.session_state.get('posts_editor_version', 0)}"
                         row_cols = st.columns([.42, 5.4, .85, .8, .78], gap="small")
@@ -2761,6 +2838,7 @@ st.markdown(
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-preview-pane-title) {
         min-width: 0;
         background: rgba(24, 24, 27, .68) !important;
+        padding: 14px !important;
     }
     .post-library-finder-title {
         color: var(--faint);
@@ -2821,12 +2899,22 @@ st.markdown(
         font-size: .84rem;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-finder-title) [data-testid="stFileUploader"] section {
-        min-height: 0 !important;
-        padding: 10px !important;
+        min-height: 112px !important;
+        padding: 13px !important;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-finder-title) [data-testid="stFileUploader"] section > div {
-        min-height: 0 !important;
-        gap: 6px !important;
+        min-height: 86px !important;
+        gap: 10px !important;
+        align-items: center !important;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-finder-title) [data-testid="stFileUploader"] small {
+        line-height: 1.35 !important;
+        text-align: center !important;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-finder-title) [data-testid="stFileUploader"] button {
+        min-height: 34px !important;
+        padding: 6px 10px !important;
+        white-space: nowrap !important;
     }
     .post-list-head-new {
         grid-template-columns: .42fr 5.4fr .85fr .8fr .78fr;
@@ -2994,6 +3082,14 @@ st.markdown(
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+    }
+    .post-library-page-info {
+        min-height: 36px;
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        font-size: .82rem;
+        font-variant-numeric: tabular-nums;
     }
     .post-readable-meta small.has-media {
         color: rgba(220,252,231,.92);
