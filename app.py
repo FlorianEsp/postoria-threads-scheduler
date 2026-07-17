@@ -1466,11 +1466,44 @@ def render_accounts_group_board(
     content = "".join(chips) or "<span class='accounts-group-empty'>Aucun groupe créé</span>"
     st.markdown(
         "<section class='accounts-group-board'>"
-        "<header><span>GROUPES</span><small>La sélection se règle juste dessous</small></header>"
+        "<header><span>GROUPES POUR CE PLANNING</span><small>Clique un groupe juste dessous pour utiliser ses comptes.</small></header>"
         f"<div>{content}</div>"
         "</section>",
         unsafe_allow_html=True,
     )
+
+
+def render_group_planning_selector(
+    groups: list[dict],
+    group_accounts_by_name: dict[str, list[dict]],
+    selected_group_filters: list[str],
+) -> None:
+    """Direct group selection for the next schedule instead of decorative-only chips."""
+    if not groups:
+        return
+    st.markdown("<div class='group-plan-picker-label'>Choisir le groupe à planifier</div>", unsafe_allow_html=True)
+    group_columns = st.columns(min(4, max(1, len(groups))))
+    selected_names = set(selected_group_filters)
+    for index, group in enumerate(groups):
+        group_name = str(group["name"])
+        account_count = len(group_accounts_by_name.get(group_name, []))
+        is_selected = group_name in selected_names
+        label = f"{'✓ ' if is_selected else ''}{group_name} · {account_count} compte{'s' if account_count != 1 else ''}"
+        with group_columns[index % len(group_columns)]:
+            if st.button(
+                label,
+                key=f"plan_group_{index}_{widget_slug(group_name)}",
+                type="primary" if is_selected else "secondary",
+                disabled=not account_count,
+                use_container_width=True,
+            ):
+                # A direct choice means only this group's accounts go to Cadence.
+                st.session_state["selected_group_filters"] = [group_name]
+                st.session_state["manual_included_accounts"] = []
+                st.session_state["manual_excluded_accounts"] = []
+                st.session_state.pop("_account_group_signature", None)
+                mark_group_config_dirty()
+                st.rerun()
 
 
 def section_intro(step: str, title: str, body: str) -> None:
@@ -4160,6 +4193,12 @@ st.markdown(
         gap: 10px 20px;
         align-items: center;
     }
+    .group-plan-picker-label {
+        margin: 4px 0 8px;
+        color: var(--muted);
+        font-size: .8rem;
+        font-weight: 700;
+    }
     .accounts-group-chip {
         display: inline-grid;
         grid-template-columns: 10px minmax(0, 1fr) auto;
@@ -4734,8 +4773,9 @@ if active_page != "dashboard" and active_step == 0:
             st.session_state["_account_group_signature"] = group_signature
 
         render_accounts_group_board(groups, group_accounts_by_name, selected_group_filters)
-        with st.expander("Modifier les groupes sélectionnés", expanded=False):
-            st.caption("Choisis les groupes qui participent à cette planification.")
+        render_group_planning_selector(groups, group_accounts_by_name, selected_group_filters)
+        with st.expander("Ajouter ou retirer d'autres groupes", expanded=False):
+            st.caption("Optionnel : combine plusieurs groupes pour la même planification.")
             group_cols = st.columns(min(3, max(1, len(groups))))
             for idx, group in enumerate(groups):
                 group_name = group["name"]
