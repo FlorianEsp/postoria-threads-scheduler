@@ -150,7 +150,8 @@ def init_db() -> None:
                 photo_note TEXT DEFAULT '',
                 media_folder TEXT DEFAULT '',
                 variables_json TEXT DEFAULT '',
-                reply_chain TEXT DEFAULT ''
+                reply_chain TEXT DEFAULT '',
+                is_favorite INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS post_import_batches (
@@ -269,6 +270,7 @@ def init_db() -> None:
         _ensure_column(conn, "post_library", "media_folder", "TEXT DEFAULT ''")
         _ensure_column(conn, "post_library", "variables_json", "TEXT DEFAULT ''")
         _ensure_column(conn, "post_library", "reply_chain", "TEXT DEFAULT ''")
+        _ensure_column(conn, "post_library", "is_favorite", "INTEGER DEFAULT 0")
         _ensure_column(conn, "post_import_batches", "name", "TEXT DEFAULT ''")
         _ensure_column(conn, "post_import_batches", "source_type", "TEXT DEFAULT 'csv'")
         _ensure_column(conn, "post_import_batches", "file_name", "TEXT DEFAULT ''")
@@ -509,6 +511,14 @@ def update_post_caption(post_id: int, caption: str) -> bool:
             (clean_caption, clean_hash, int(post_id)),
         )
     return True
+
+
+def set_post_favorite(post_id: int, is_favorite: bool) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE post_library SET is_favorite=? WHERE id=?",
+            (int(bool(is_favorite)), int(post_id)),
+        )
 
 
 def list_posts(active_only: bool = True) -> list[dict[str, Any]]:
