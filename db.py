@@ -287,6 +287,7 @@ def init_db() -> None:
         _ensure_column(conn, "accounts", "group_name", "TEXT DEFAULT 'tous'")
         _ensure_column(conn, "accounts", "selected_for_schedule", "INTEGER DEFAULT 1")
         _ensure_column(conn, "account_groups", "color", "TEXT DEFAULT '#8b5cf6'")
+        _ensure_column(conn, "account_groups", "strategy", "TEXT DEFAULT 'default'")
         _ensure_column(conn, "scheduled_posts", "media_ids", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "local_photo_asset_ids", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "content_type", "TEXT DEFAULT 'text'")
@@ -773,6 +774,100 @@ def list_groups() -> list[dict[str, Any]]:
                 """
             ).fetchall()
         ]
+
+
+def export_group_configuration() -> dict[str, list[dict[str, Any]]]:
+    """Return only the workspace-specific account configuration for remote backup."""
+    with connect() as conn:
+        groups = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT name, offset_minutes, color, strategy
+                FROM account_groups
+                ORDER BY name COLLATE NOCASE
+                """
+            ).fetchall()
+        ]
+        accounts = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id, group_name, active_for_day, selected_for_schedule
+                FROM accounts
+                ORDER BY id
+                """
+            ).fetchall()
+        ]
+    return {"groups": groups, "accounts": accounts}
+
+
+def apply_group_configuration(configuration: dict[str, Any]) -> dict[str, int]:
+    """Restore a remote group snapshot without reintroducing removed Postoria accounts."""
+    raw_groups = configuration.get("groups") if isinstance(configuration, dict) else []
+    raw_accounts = configuration.get("accounts") if isinstance(configuration, dict) else []
+    groups = raw_groups if isinstance(raw_groups, list) else []
+    accounts = raw_accounts if isinstance(raw_accounts, list) else []
+    restored_groups = 0
+    restored_accounts = 0
+    with connect() as conn:
+        for raw_group in groups:
+            if not isinstance(raw_group, dict):
+                continue
+            name = str(raw_group.get("name") or "").strip()
+            if not name:
+                continue
+            conn.execute(
+                """
+                INSERT INTO account_groups (name, offset_minutes, color, strategy)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    offset_minutes=excluded.offset_minutes,
+                    color=excluded.color,
+                    strategy=excluded.strategy
+                """,
+                (
+                    name,
+                    int(raw_group.get("offset_minutes") or 0),
+                    str(raw_group.get("color") or "#8b5cf6"),
+                    str(raw_group.get("strategy") or "default"),
+                ),
+            )
+            restored_groups += 1
+
+        existing_ids = {
+            int(row["id"])
+            for row in conn.execute("SELECT id FROM accounts").fetchall()
+        }
+        for raw_account in accounts:
+            if not isinstance(raw_account, dict):
+                continue
+            try:
+                account_id = int(raw_account.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if account_id not in existing_ids:
+                continue
+            group_name = str(raw_account.get("group_name") or "tous").strip() or "tous"
+            conn.execute(
+                "INSERT OR IGNORE INTO account_groups (name, offset_minutes) VALUES (?, 0)",
+                (group_name,),
+            )
+            conn.execute(
+                """
+                UPDATE accounts
+                SET group_name=?, active_for_day=?, selected_for_schedule=?
+                WHERE id=?
+                """,
+                (
+                    group_name,
+                    int(bool(raw_account.get("active_for_day", True))),
+                    int(bool(raw_account.get("selected_for_schedule", False))),
+                    account_id,
+                ),
+            )
+            restored_accounts += 1
+    return {"groups": restored_groups, "accounts": restored_accounts}
 
 
 def upsert_group(name: str, offset_minutes: int = 0, color: str = "#8b5cf6") -> bool:

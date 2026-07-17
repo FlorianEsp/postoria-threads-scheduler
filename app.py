@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 import db
 from postoria_client import PostoriaClient
 from scheduler import generate_schedule
+from supabase_groups import GroupStoreError, SupabaseGroupStore
 
 # streamlit-calendar crashes this local Python/Streamlit runtime with exit 139.
 # Keep the scheduler stable and use the richer table preview instead.
@@ -26,6 +27,42 @@ load_dotenv()
 db.init_db()
 
 APP_TZ = os.getenv("APP_TIMEZONE", "Europe/Brussels")
+
+
+def optional_secret(name: str) -> str:
+    """Read a local env var or a Streamlit Cloud secret without exposing it in the UI."""
+    try:
+        value = st.secrets.get(name, os.getenv(name, ""))
+    except Exception:
+        value = os.getenv(name, "")
+    return str(value or "").strip()
+
+
+GROUP_STORE = SupabaseGroupStore(
+    base_url=optional_secret("SUPABASE_URL"),
+    service_key=optional_secret("SUPABASE_SERVICE_KEY"),
+)
+
+
+def mark_group_config_dirty() -> None:
+    st.session_state["remote_group_config_dirty"] = True
+
+
+def persist_group_config_if_needed(force: bool = False) -> bool:
+    """Persist account groups only after the local SQLite changes are complete."""
+    workspace_id = str(st.session_state.get("workspace_id") or "").strip()
+    if not GROUP_STORE.configured or not workspace_id:
+        return False
+    if not force and not st.session_state.get("remote_group_config_dirty"):
+        return False
+    try:
+        GROUP_STORE.save(workspace_id, db.export_group_configuration())
+        st.session_state["remote_group_config_dirty"] = False
+        st.session_state.pop("remote_group_config_error", None)
+        return True
+    except GroupStoreError as exc:
+        st.session_state["remote_group_config_error"] = str(exc)
+        return False
 
 
 def media_ids_text(value) -> str:
@@ -1885,6 +1922,7 @@ def render_group_form(form_key: str, close_on_save: bool = False) -> None:
     )
     if st.button("Créer le groupe", disabled=not name.strip(), key=f"{form_key}_save"):
         created = db.upsert_group(name, color=color)
+        mark_group_config_dirty()
         st.success("Groupe créé." if created else "Groupe mis à jour.")
         if close_on_save:
             st.session_state["show_group_dialog"] = False
@@ -4603,10 +4641,25 @@ if active_page != "dashboard" and active_step == 0:
                             accounts = client.list_social_accounts(int(workspace_id))
                             threads_accounts = [a for a in accounts if str(a.get("network", "")).lower() == "threads"]
                             sync_result = db.sync_accounts(threads_accounts)
+                            restored_message = ""
+                            if GROUP_STORE.configured:
+                                try:
+                                    saved_config = GROUP_STORE.load(str(workspace_id))
+                                    if saved_config:
+                                        restored = db.apply_group_configuration(saved_config)
+                                        restored_message = (
+                                            f" {restored['groups']} groupe(s) et "
+                                            f"{restored['accounts']} préférence(s) restauré(s)."
+                                        )
+                                        st.session_state["remote_group_config_dirty"] = False
+                                    st.session_state["remote_group_config_workspace"] = str(workspace_id)
+                                    st.session_state.pop("remote_group_config_error", None)
+                                except GroupStoreError as exc:
+                                    st.session_state["remote_group_config_error"] = str(exc)
                             fresh_accounts = db.list_accounts()
                             reset_account_session_after_sync(fresh_accounts)
                             removed_message = f" {sync_result['removed']} ancien(s) compte(s) retiré(s)." if sync_result["removed"] else ""
-                            st.success(f"{sync_result['synced']} comptes Threads synchronisés.{removed_message}")
+                            st.success(f"{sync_result['synced']} comptes Threads synchronisés.{removed_message}{restored_message}")
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
@@ -4648,12 +4701,20 @@ if active_page != "dashboard" and active_step == 0:
             for account in accounts:
                 account_id = int(account["id"])
                 st.session_state[f"account_use_{account_id}"] = True
+            mark_group_config_dirty()
             st.rerun()
         if create_group:
             st.session_state["show_group_dialog"] = True
             st.rerun()
         if st.session_state.get("show_group_dialog"):
             render_create_group_dialog()
+
+        if GROUP_STORE.configured:
+            st.caption("Sauvegarde durable des groupes : active pour ce workspace.")
+        elif st.session_state.get("workspace_id"):
+            st.caption("Groupes locaux uniquement. Configure Supabase pour les retrouver après un redémarrage Cloud.")
+        if st.session_state.get("remote_group_config_error"):
+            st.warning(st.session_state["remote_group_config_error"])
 
         selected_group_filters = st.session_state.get("selected_group_filters", [])
         manual_included = set(st.session_state.get("manual_included_accounts", []))
@@ -4691,6 +4752,7 @@ if active_page != "dashboard" and active_step == 0:
                             selected.add(group_name)
                         st.session_state["selected_group_filters"] = [name for name in group_options if name in selected]
                         st.session_state.pop("_account_group_signature", None)
+                        mark_group_config_dirty()
                         st.rerun()
             st.divider()
             current_groups = set(st.session_state.get("selected_group_filters", []))
@@ -4706,6 +4768,7 @@ if active_page != "dashboard" and active_step == 0:
             if set(advanced_groups) != current_groups:
                 st.session_state["selected_group_filters"] = advanced_groups
                 st.session_state.pop("_account_group_signature", None)
+                mark_group_config_dirty()
                 st.rerun()
 
         for account in accounts:
@@ -4760,6 +4823,7 @@ if active_page != "dashboard" and active_step == 0:
                     st.session_state.pop("_account_group_signature", None)
                     for account in selected_accounts_preview:
                         st.session_state[f"account_use_{int(account['id'])}"] = False
+                    mark_group_config_dirty()
                     st.rerun()
             if selected_accounts_preview:
                 preview_cols = st.columns(3)
@@ -4798,6 +4862,7 @@ if active_page != "dashboard" and active_step == 0:
                     db.update_account_preferences(account_id, group_name, True, True)
                 st.session_state["grouped_accounts"] = continuation_groups
                 st.session_state["selected_accounts"] = continuation_accounts
+                persist_group_config_if_needed(force=True)
                 st.session_state["account_step_done"] = True
                 st.session_state["active_step"] = 1
                 st.session_state["app_page"] = "cadence"
@@ -4832,6 +4897,7 @@ if active_page != "dashboard" and active_step == 0:
                     "Utiliser",
                     key=f"account_use_{account_id}",
                     label_visibility="collapsed",
+                    on_change=mark_group_config_dirty,
                 )
             with row_cols[1]:
                 avatar_url = account.get("avatar_url")
@@ -4864,6 +4930,7 @@ if active_page != "dashboard" and active_step == 0:
                             type="primary" if group_name == current_group else "secondary",
                         ):
                             st.session_state[f"account_group_{account_id}"] = group_name
+                            mark_group_config_dirty()
                             st.rerun()
             with row_cols[3]:
                 st.markdown(
@@ -4921,6 +4988,7 @@ if active_page != "dashboard" and active_step == 0:
         selected_accounts = [account for group in grouped.values() for account in group["accounts"]]
         st.session_state["grouped_accounts"] = grouped
         st.session_state["selected_accounts"] = selected_accounts
+        persist_group_config_if_needed()
         if selected_accounts:
             st.success(f"{len(selected_accounts)} comptes prêts dans {len(grouped)} groupes.")
         else:

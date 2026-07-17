@@ -46,6 +46,29 @@ APP_TIMEZONE=Europe/Brussels
 
 Important : ne mets jamais `.env` sur GitHub.
 
+### Groupes persistants sur Streamlit Cloud (optionnel)
+
+Sur Streamlit Community Cloud, le fichier SQLite local peut être recréé après un redéploiement ou un redémarrage. Pour conserver les groupes, leurs couleurs et l'appartenance de chaque compte, crée un projet Supabase puis exécute une fois cette requête dans le SQL Editor :
+
+```sql
+create table if not exists public.scheduler_group_configs (
+  workspace_id text primary key,
+  config jsonb not null default '{"groups": [], "accounts": []}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.scheduler_group_configs enable row level security;
+```
+
+Ajoute ensuite ces secrets dans Streamlit Cloud, dans **App settings > Secrets** (jamais dans GitHub) :
+
+```toml
+SUPABASE_URL = "https://ton-projet.supabase.co"
+SUPABASE_SERVICE_KEY = "ta_service_role_key"
+```
+
+Après avoir choisi le workspace, clique sur **Charger comptes Threads** : l'app récupère les comptes Postoria, puis restaure les groupes sauvegardés pour ce workspace. Sans ces secrets, l'application continue de fonctionner avec la base SQLite locale.
+
 ## Lancement
 
 ```bash
