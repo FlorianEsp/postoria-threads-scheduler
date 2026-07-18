@@ -1250,7 +1250,7 @@ def render_post_library_workspace() -> None:
     st.markdown(
         "<div class='post-library-workspace'></div>"
         "<div class='post-library-header'><div><span>Bibliothèque</span><h3>Posts</h3>"
-        "<p>Les coches définissent la prochaine preview. L'aperçu reste indépendant.</p></div>"
+        "<p>Les coches définissent les posts de la prochaine preview.</p></div>"
         f"<b>{len(selected_ids)} sélectionné(s)</b></div>",
         unsafe_allow_html=True,
     )
@@ -1381,15 +1381,15 @@ def render_post_library_workspace() -> None:
                     st.session_state[page_key] = current_page + 1
                     st.rerun()
 
-            st.markdown("<div class='post-list-head post-list-head-new'><span></span><span>POST</span><span>MÉDIA</span><span>UTILISÉ</span><span>MODIFIER</span></div>", unsafe_allow_html=True)
-            with st.container(height=690, border=False):
+            st.markdown("<div class='post-list-head post-list-head-new'><span></span><span>POST</span><span>MÉDIA</span><span>UTILISÉ</span></div>", unsafe_allow_html=True)
+            with st.container(height=620, border=False):
                 if not visible_posts:
                     st.markdown("<div class='post-library-empty'>Aucun post dans cette vue.</div>", unsafe_allow_html=True)
                 else:
                     for post in page_posts:
                         post_id = int(post["id"])
                         selection_key = f"library_selected_{post_id}_{st.session_state.get('posts_editor_version', 0)}"
-                        row_cols = st.columns([.44, 8.5, .9, .85, 1.15], gap="small")
+                        row_cols = st.columns([.44, 9.7, .9, .95], gap="small")
                         with row_cols[0]:
                             st.checkbox(
                                 "Sélectionner",
@@ -1401,27 +1401,26 @@ def render_post_library_workspace() -> None:
                                 args=(post_id, selection_key),
                             )
                         with row_cols[1]:
-                            st.markdown(
-                                "<div class='post-library-row-caption'>"
-                                "<i>T</i>"
-                                f"<span>{h(str(post.get('caption') or 'Post sans texte'))}</span>"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
+                            st.markdown("<div class='post-row-click-target'></div>", unsafe_allow_html=True)
+                            if st.button(
+                                str(post.get("caption") or "Post sans texte"),
+                                key=f"library_edit_post_{post_id}",
+                                use_container_width=True,
+                                help="Ouvrir et modifier ce post",
+                            ):
+                                st.session_state["post_library_edit_id"] = post_id
+                                st.rerun()
                         with row_cols[2]:
                             st.markdown(
                                 f"<div class='post-library-row-meta'>{'Photo' if media_ids_text(post.get('media_ids')) else '—'}</div>",
                                 unsafe_allow_html=True,
                             )
                         with row_cols[3]:
+                            used_count = int(post.get("total_used") or 0)
                             st.markdown(
-                                f"<div class='post-library-row-meta'>{int(post.get('total_used') or 0)}</div>",
+                                f"<div class='post-library-row-meta {'is-used' if used_count else ''}'>{f'{used_count} fois' if used_count else '—'}</div>",
                                 unsafe_allow_html=True,
                             )
-                        with row_cols[4]:
-                            if st.button("Modifier", key=f"library_edit_post_{post_id}", use_container_width=True):
-                                st.session_state["post_library_edit_id"] = post_id
-                                st.rerun()
                         st.markdown("<div class='post-row-divider'></div>", unsafe_allow_html=True)
 
     if st.session_state.get("post_library_new_post"):
@@ -1753,7 +1752,16 @@ def render_sidebar_navigation(active_page: str, api_exists: bool, dry_run_defaul
         ("ANALYSE", [("analytics", "Analytics")]),
         ("ENVOI", [("send", "Envoi Postoria"), ("tracking", "Suivi")]),
     ]
+    if st.session_state.get("sidebar_collapsed", False):
+        with st.sidebar:
+            st.empty()
+        return active_page, bool(st.session_state.get("sidebar_dry_run", dry_run_default))
+
     with st.sidebar:
+        st.markdown("<div class='sidebar-collapse-marker'></div>", unsafe_allow_html=True)
+        if st.button("<", key="sidebar_collapse", help="Masquer la navigation", type="secondary"):
+            st.session_state["sidebar_collapsed"] = True
+            st.rerun()
         st.markdown(
             "<div class='sidebar-brand'><i>P</i><div><b>Postoria</b><span>THREADS SCHEDULER</span></div></div>",
             unsafe_allow_html=True,
@@ -2886,7 +2894,7 @@ st.markdown(
         white-space: nowrap !important;
     }
     .post-list-head-new {
-        grid-template-columns: .44fr 8.5fr .9fr .85fr 1.15fr;
+        grid-template-columns: .44fr 9.7fr .9fr .95fr;
         gap: 12px;
         margin-top: 14px;
         min-height: 42px;
@@ -2928,9 +2936,45 @@ st.markdown(
         min-height: 82px;
         display: flex;
         align-items: center;
+        justify-content: center;
+        text-align: center;
         color: var(--muted);
         font-size: .84rem;
         font-variant-numeric: tabular-nums;
+    }
+    .post-library-row-meta.is-used {
+        color: var(--accent);
+        font-weight: 760;
+    }
+    div[data-testid="stVerticalBlock"]:has(.post-row-click-target) [data-testid="stButton"] {
+        width: 100%;
+        margin: 0 !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button {
+        min-height: 82px !important;
+        padding: 14px 16px !important;
+        justify-content: flex-start !important;
+        border-color: rgba(255, 255, 255, .10) !important;
+        background: rgba(9, 9, 11, .32) !important;
+        color: var(--text) !important;
+        text-align: left !important;
+        white-space: normal !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button:hover {
+        border-color: rgba(244, 63, 94, .45) !important;
+        background: rgba(244, 63, 94, .07) !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button p {
+        display: -webkit-box !important;
+        margin: 0 !important;
+        overflow: hidden !important;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        color: var(--text) !important;
+        font-size: 1rem !important;
+        font-weight: 620 !important;
+        line-height: 1.48 !important;
+        text-align: left !important;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-list-title) [data-testid="stButton"] button {
         min-height: 38px !important;
@@ -3853,6 +3897,23 @@ st.markdown(
     [data-testid="stSidebar"] > div:first-child {
         padding: 18px 12px 22px;
     }
+    div[data-testid="stVerticalBlock"]:has(.sidebar-collapse-marker) [data-testid="stButton"],
+    div[data-testid="stVerticalBlock"]:has(.sidebar-expand-marker) [data-testid="stButton"] {
+        width: 38px;
+        margin: 0 0 8px !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.sidebar-collapse-marker) [data-testid="stButton"] button,
+    div[data-testid="stVerticalBlock"]:has(.sidebar-expand-marker) [data-testid="stButton"] button {
+        width: 38px !important;
+        min-width: 38px !important;
+        min-height: 34px !important;
+        padding: 0 !important;
+        justify-content: center !important;
+        font-size: 1.15rem !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.sidebar-expand-marker) {
+        margin: 0 0 8px !important;
+    }
     .sidebar-brand {
         display: flex;
         align-items: center;
@@ -4651,7 +4712,14 @@ st.markdown(
 api_exists = bool(os.getenv("POSTORIA_API_KEY"))
 st.session_state.setdefault("app_page", "dashboard")
 st.session_state.setdefault("sidebar_dry_run", True)
+st.session_state.setdefault("sidebar_collapsed", False)
 dry_run = bool(st.session_state["sidebar_dry_run"])
+
+if st.session_state["sidebar_collapsed"]:
+    st.markdown(
+        "<style>[data-testid='stSidebar'] {display: none !important;}</style>",
+        unsafe_allow_html=True,
+    )
 
 client = None
 if api_exists:
@@ -4701,6 +4769,12 @@ page_to_step = {
 }
 active_step = page_to_step.get(active_page, int(st.session_state.get("active_step", 0)))
 st.session_state["active_step"] = active_step
+
+if st.session_state["sidebar_collapsed"]:
+    st.markdown("<div class='sidebar-expand-marker'></div>", unsafe_allow_html=True)
+    if st.button(">", key="sidebar_expand", help="Afficher la navigation", type="secondary"):
+        st.session_state["sidebar_collapsed"] = False
+        st.rerun()
 
 render_app_header(api_exists, dry_run, APP_TZ)
 if active_page != "dashboard":
