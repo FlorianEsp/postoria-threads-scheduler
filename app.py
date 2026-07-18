@@ -1239,7 +1239,7 @@ def render_post_library_workspace() -> None:
         visible_posts = [post for post in all_posts if int(post["id"]) in current_batch_ids]
 
     import_notice = str(st.session_state.pop("post_library_import_notice", "") or "").strip()
-    page_size = 24
+    page_size = 18
     page_key = f"post_library_page_{active_batch_id}"
     page_count = max(1, (len(visible_posts) + page_size - 1) // page_size)
     current_page = max(1, min(int(st.session_state.get(page_key, 1) or 1), page_count))
@@ -1257,7 +1257,7 @@ def render_post_library_workspace() -> None:
     if import_notice:
         st.success(import_notice)
 
-    finder_col, list_col, preview_col = st.columns([1.25, 2.05, 1.45], gap="large")
+    finder_col, list_col = st.columns([1.18, 3.82], gap="large")
     with finder_col:
         with st.container(border=True):
             st.markdown("<div class='post-library-finder-title'>BIBLIOTHÈQUE</div>", unsafe_allow_html=True)
@@ -1381,15 +1381,15 @@ def render_post_library_workspace() -> None:
                     st.session_state[page_key] = current_page + 1
                     st.rerun()
 
-            st.markdown("<div class='post-list-head post-list-head-new'><span></span><span>POST</span><span>MÉDIA</span><span>UTILISÉ</span><span></span></div>", unsafe_allow_html=True)
-            with st.container(height=640, border=False):
+            st.markdown("<div class='post-list-head post-list-head-new'><span></span><span>POST</span><span>MÉDIA</span><span>UTILISÉ</span><span>MODIFIER</span></div>", unsafe_allow_html=True)
+            with st.container(height=690, border=False):
                 if not visible_posts:
                     st.markdown("<div class='post-library-empty'>Aucun post dans cette vue.</div>", unsafe_allow_html=True)
                 else:
                     for post in page_posts:
                         post_id = int(post["id"])
                         selection_key = f"library_selected_{post_id}_{st.session_state.get('posts_editor_version', 0)}"
-                        row_cols = st.columns([.42, 5.4, .85, .8, .78], gap="small")
+                        row_cols = st.columns([.44, 8.5, .9, .85, 1.15], gap="small")
                         with row_cols[0]:
                             st.checkbox(
                                 "Sélectionner",
@@ -1419,41 +1419,10 @@ def render_post_library_workspace() -> None:
                                 unsafe_allow_html=True,
                             )
                         with row_cols[4]:
-                            if st.button("Voir", key=f"library_open_post_{post_id}", use_container_width=True):
-                                st.session_state["library_preview_post_id"] = post_id
+                            if st.button("Modifier", key=f"library_edit_post_{post_id}", use_container_width=True):
+                                st.session_state["post_library_edit_id"] = post_id
                                 st.rerun()
                         st.markdown("<div class='post-row-divider'></div>", unsafe_allow_html=True)
-
-    with preview_col:
-        with st.container(border=True):
-            st.markdown("<div class='post-preview-pane-title'>Aperçu</div>", unsafe_allow_html=True)
-            preview_id = int(st.session_state.get("library_preview_post_id") or 0)
-            preview_post = post_by_id.get(preview_id)
-            if not preview_post:
-                st.markdown(
-                    "<div class='post-preview-empty'><div class='post-preview-symbol'>T</div>"
-                    "<strong>Ouvre un post</strong><span>Utilise le bouton Voir dans la liste pour lire son texte ici.</span></div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                media_count = len(db.parse_media_ids(preview_post.get("media_ids")))
-                reply_count = len(preview_post.get("reply_chain") or [])
-                selection_label = "Retenu pour la preview" if preview_id in selected_ids else "Non retenu"
-                st.markdown(
-                    "<article class='post-preview-card'>"
-                    "<div class='post-preview-card-head'><span>POST</span>"
-                    f"<b>{h(selection_label)}</b></div>"
-                    f"<p>{h(str(preview_post.get('caption') or ''))}</p>"
-                    "<div class='post-preview-card-meta'>"
-                    f"<span>{'Photo jointe' if media_count else 'Texte seul'}</span>"
-                    f"<span>Utilisé {int(preview_post.get('total_used') or 0)} fois</span>"
-                    f"<span>{reply_count} réponse(s)</span>"
-                    "</div></article>",
-                    unsafe_allow_html=True,
-                )
-                if st.button("Modifier ce post", key=f"library_edit_post_{preview_id}", use_container_width=True):
-                    st.session_state["post_library_edit_id"] = preview_id
-                    st.rerun()
 
     if st.session_state.get("post_library_new_post"):
         @st.dialog("Nouveau post")
@@ -2917,22 +2886,24 @@ st.markdown(
         white-space: nowrap !important;
     }
     .post-list-head-new {
-        grid-template-columns: .42fr 5.4fr .85fr .8fr .78fr;
-        gap: 8px;
-        margin-top: 4px;
+        grid-template-columns: .44fr 8.5fr .9fr .85fr 1.15fr;
+        gap: 12px;
+        margin-top: 14px;
+        min-height: 42px;
         padding-left: 0;
         padding-right: 0;
     }
     .post-library-row-caption {
         display: grid;
-        grid-template-columns: 34px minmax(0, 1fr);
-        gap: 10px;
+        grid-template-columns: 40px minmax(0, 1fr);
+        gap: 14px;
         align-items: center;
-        min-height: 48px;
+        min-height: 82px;
+        padding: 8px 0;
     }
     .post-library-row-caption i {
-        width: 34px;
-        height: 34px;
+        width: 40px;
+        height: 40px;
         display: grid;
         place-items: center;
         border-radius: 8px;
@@ -2947,28 +2918,28 @@ st.markdown(
         overflow: hidden;
         display: -webkit-box;
         -webkit-box-orient: vertical;
-        -webkit-line-clamp: 2;
+        -webkit-line-clamp: 3;
         color: var(--text);
-        font-size: .89rem;
-        font-weight: 640;
-        line-height: 1.36;
+        font-size: 1rem;
+        font-weight: 620;
+        line-height: 1.48;
     }
     .post-library-row-meta {
-        min-height: 48px;
+        min-height: 82px;
         display: flex;
         align-items: center;
         color: var(--muted);
-        font-size: .78rem;
+        font-size: .84rem;
         font-variant-numeric: tabular-nums;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-list-title) [data-testid="stButton"] button {
-        min-height: 36px !important;
-        padding: 7px 9px !important;
-        font-size: .78rem !important;
+        min-height: 38px !important;
+        padding: 8px 10px !important;
+        font-size: .8rem !important;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-list-title) [data-testid="stCheckbox"] {
         display: flex;
-        min-height: 48px;
+        min-height: 82px;
         align-items: center;
         justify-content: center;
     }
