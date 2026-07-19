@@ -19,6 +19,8 @@ from postoria_client import PostoriaClient
 from scheduler import generate_schedule
 from supabase_groups import GroupStoreError, SupabaseGroupStore
 
+st.set_page_config(page_title="Postoria Threads Scheduler", layout="wide")
+
 # streamlit-calendar crashes this local Python/Streamlit runtime with exit 139.
 # Keep the scheduler stable and use the richer table preview instead.
 calendar = None
@@ -1257,7 +1259,7 @@ def render_post_library_workspace() -> None:
     if import_notice:
         st.success(import_notice)
 
-    finder_col, list_col = st.columns([1.18, 3.82], gap="large")
+    finder_col, list_col = st.columns([1.05, 3.95], gap="medium")
     with finder_col:
         with st.container(border=True):
             st.markdown("<div class='post-library-finder-title'>BIBLIOTHÈQUE</div>", unsafe_allow_html=True)
@@ -1421,7 +1423,6 @@ def render_post_library_workspace() -> None:
                                 f"<div class='post-library-row-meta {'is-used' if used_count else ''}'>{f'{used_count} fois' if used_count else '—'}</div>",
                                 unsafe_allow_html=True,
                             )
-                        st.markdown("<div class='post-row-divider'></div>", unsafe_allow_html=True)
 
     if st.session_state.get("post_library_new_post"):
         @st.dialog("Nouveau post")
@@ -1758,10 +1759,11 @@ def render_sidebar_navigation(active_page: str, api_exists: bool, dry_run_defaul
         return active_page, bool(st.session_state.get("sidebar_dry_run", dry_run_default))
 
     with st.sidebar:
-        st.markdown("<div class='sidebar-collapse-marker'></div>", unsafe_allow_html=True)
-        if st.button("<", key="sidebar_collapse", help="Masquer la navigation", type="secondary"):
-            st.session_state["sidebar_collapsed"] = True
-            st.rerun()
+        collapse_space, collapse_action = st.columns([5, 1])
+        with collapse_action:
+            if st.button("<", key="sidebar_collapse", help="Masquer la navigation", type="secondary", use_container_width=True):
+                st.session_state["sidebar_collapsed"] = True
+                st.rerun()
         st.markdown(
             "<div class='sidebar-brand'><i>P</i><div><b>Postoria</b><span>THREADS SCHEDULER</span></div></div>",
             unsafe_allow_html=True,
@@ -1777,6 +1779,7 @@ def render_sidebar_navigation(active_page: str, api_exists: bool, dry_run_defaul
                 ):
                     active_page = page_key
                     st.session_state["app_page"] = page_key
+                    st.rerun()
         st.divider()
         with st.expander("Réglages", expanded=False):
             dry_run = st.toggle("Mode dry-run", value=dry_run_default, key="sidebar_dry_run")
@@ -2064,7 +2067,6 @@ def render_reset_dialog(mode: str) -> None:
             _content()
 
 
-st.set_page_config(page_title="Postoria Threads Scheduler", layout="wide")
 st.markdown(
     """
     <style>
@@ -2810,6 +2812,11 @@ st.markdown(
         font-size: .82rem;
     }
     /* Post library: compact Finder navigation, dense list, full-height preview. */
+    .block-container:has(.post-library-workspace) {
+        max-width: 1600px !important;
+        padding-left: 1.5rem !important;
+        padding-right: 1.5rem !important;
+    }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-finder-title),
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-list-title),
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-preview-pane-title) {
@@ -2895,11 +2902,16 @@ st.markdown(
     }
     .post-list-head-new {
         grid-template-columns: .44fr 9.7fr .9fr .95fr;
-        gap: 12px;
+        gap: 0;
         margin-top: 14px;
         min-height: 42px;
-        padding-left: 0;
-        padding-right: 0;
+        padding: 0 4px 10px;
+    }
+    .post-list-head-new span {
+        padding: 0 8px;
+    }
+    .post-list-head-new span:nth-child(n + 3) {
+        text-align: center;
     }
     .post-library-row-caption {
         display: grid;
@@ -2933,7 +2945,7 @@ st.markdown(
         line-height: 1.48;
     }
     .post-library-row-meta {
-        min-height: 82px;
+        min-height: 88px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -2946,25 +2958,48 @@ st.markdown(
         color: var(--accent);
         font-weight: 760;
     }
-    div[data-testid="stVerticalBlock"]:has(.post-row-click-target) [data-testid="stButton"] {
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) {
+        gap: 0 !important;
+        align-items: stretch !important;
+        margin: 0 !important;
+        padding: 0 4px !important;
+        border-bottom: 1px solid var(--line);
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) > div {
+        min-width: 0 !important;
+        padding: 0 8px !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) > div:first-child {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding-left: 0 !important;
+        padding-right: 4px !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) [data-testid="stButton"] {
         width: 100%;
         margin: 0 !important;
     }
-    div[data-testid="stVerticalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button {
-        min-height: 82px !important;
-        padding: 14px 16px !important;
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button {
+        min-height: 88px !important;
+        padding: 14px 8px !important;
         justify-content: flex-start !important;
-        border-color: rgba(255, 255, 255, .10) !important;
-        background: rgba(9, 9, 11, .32) !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
         color: var(--text) !important;
         text-align: left !important;
         white-space: normal !important;
     }
-    div[data-testid="stVerticalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button:hover {
-        border-color: rgba(244, 63, 94, .45) !important;
-        background: rgba(244, 63, 94, .07) !important;
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target):hover {
+        background: rgba(244, 63, 94, .045);
     }
-    div[data-testid="stVerticalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button p {
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button:hover {
+        transform: none !important;
+        background: transparent !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button p {
         display: -webkit-box !important;
         margin: 0 !important;
         overflow: hidden !important;
@@ -2983,7 +3018,7 @@ st.markdown(
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.post-library-list-title) [data-testid="stCheckbox"] {
         display: flex;
-        min-height: 82px;
+        min-height: 88px;
         align-items: center;
         justify-content: center;
     }
@@ -3897,23 +3932,6 @@ st.markdown(
     [data-testid="stSidebar"] > div:first-child {
         padding: 18px 12px 22px;
     }
-    div[data-testid="stVerticalBlock"]:has(.sidebar-collapse-marker) [data-testid="stButton"],
-    div[data-testid="stVerticalBlock"]:has(.sidebar-expand-marker) [data-testid="stButton"] {
-        width: 38px;
-        margin: 0 0 8px !important;
-    }
-    div[data-testid="stVerticalBlock"]:has(.sidebar-collapse-marker) [data-testid="stButton"] button,
-    div[data-testid="stVerticalBlock"]:has(.sidebar-expand-marker) [data-testid="stButton"] button {
-        width: 38px !important;
-        min-width: 38px !important;
-        min-height: 34px !important;
-        padding: 0 !important;
-        justify-content: center !important;
-        font-size: 1.15rem !important;
-    }
-    div[data-testid="stVerticalBlock"]:has(.sidebar-expand-marker) {
-        margin: 0 0 8px !important;
-    }
     .sidebar-brand {
         display: flex;
         align-items: center;
@@ -3962,6 +3980,10 @@ st.markdown(
         color: var(--muted) !important;
         font-size: .9rem;
         font-weight: 620;
+    }
+    [data-testid="stSidebar"] div[data-testid="stHorizontalBlock"]:first-of-type [data-testid="stButton"] button {
+        padding: 0 !important;
+        justify-content: center !important;
     }
     [data-testid="stSidebar"] [data-testid="stButton"] button:hover {
         transform: none !important;
@@ -4771,10 +4793,11 @@ active_step = page_to_step.get(active_page, int(st.session_state.get("active_ste
 st.session_state["active_step"] = active_step
 
 if st.session_state["sidebar_collapsed"]:
-    st.markdown("<div class='sidebar-expand-marker'></div>", unsafe_allow_html=True)
-    if st.button(">", key="sidebar_expand", help="Afficher la navigation", type="secondary"):
-        st.session_state["sidebar_collapsed"] = False
-        st.rerun()
+    expand_action, expand_space = st.columns([0.32, 9.68])
+    with expand_action:
+        if st.button(">", key="sidebar_expand", help="Afficher la navigation", type="secondary", use_container_width=True):
+            st.session_state["sidebar_collapsed"] = False
+            st.rerun()
 
 render_app_header(api_exists, dry_run, APP_TZ)
 if active_page != "dashboard":
@@ -6239,8 +6262,8 @@ if active_page != "dashboard" and active_step == 5:
     st.subheader("Envoi Postoria")
     section_intro(
         "Étape 6",
-        "Dernier verrou avant action réelle.",
-        "L'envoi reste bloqué tant qu'il manque comptes, posts, preview, API ou que dry-run est actif.",
+        "Vérifie le résumé puis lance l'envoi.",
+        "Le bouton devient disponible dès que la preview, l'API, le workspace et les horaires sont valides.",
     )
     send_local_rows = db.list_scheduled()
     clear_all_col, clear_hint_col = st.columns([1, 2])
@@ -6285,11 +6308,6 @@ if active_page != "dashboard" and active_step == 5:
     if total_replies:
         st.warning(f"{total_replies} replies en thread chain sont en preview. Envoi Postoria actuel publie seulement le post principal.")
 
-    c1, c2, c3 = st.columns(3)
-    ok_accounts = c1.checkbox("Comptes vérifiés")
-    ok_posts = c2.checkbox("Posts/photos vérifiés")
-    ok_times = c3.checkbox("Horaires vérifiés")
-    confirm_text = st.text_input("Tape DEMARRER pour débloquer l'envoi")
     send_blockers = []
     if not st.session_state.get("selected_accounts"):
         send_blockers.append("pas de comptes")
@@ -6307,14 +6325,15 @@ if active_page != "dashboard" and active_step == 5:
         send_blockers.append("dry-run activé")
     if not workspace_id:
         send_blockers.append("workspace Postoria non choisi")
-    if not (ok_accounts and ok_posts and ok_times):
-        send_blockers.append("confirmations non cochées")
-    if confirm_text.strip().upper() != "DEMARRER":
-        send_blockers.append("confirmation DEMARRER manquante")
     can_send = not send_blockers
 
     render_blocker_chips(send_blockers)
-    if st.button("Programmer via Postoria", disabled=not can_send or dry_run):
+    if st.button(
+        "Programmer via Postoria",
+        disabled=not can_send,
+        type="primary",
+        use_container_width=True,
+    ):
         if not client or not workspace_id:
             st.error("Client Postoria ou workspace manquant.")
         else:
