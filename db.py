@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Any
@@ -214,18 +216,38 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 note TEXT DEFAULT '',
+                archived INTEGER DEFAULT 0,
+                quota_mode TEXT DEFAULT 'global',
+                global_quota INTEGER DEFAULT 0,
+                spacing_percent INTEGER DEFAULT 20,
+                rotation_order TEXT DEFAULT '[]',
+                rotation_used TEXT DEFAULT '[]',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS photo_assets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id INTEGER NOT NULL,
+                asset_key TEXT UNIQUE,
                 name TEXT NOT NULL,
                 media_id TEXT DEFAULT '',
+                media_status TEXT DEFAULT 'pending_upload',
+                media_error TEXT DEFAULT '',
+                storage_path TEXT DEFAULT '',
                 mime_type TEXT DEFAULT 'image/jpeg',
                 image_bytes BLOB,
                 note TEXT DEFAULT '',
+                usage_count INTEGER DEFAULT 0,
+                last_used_at TEXT,
+                archived INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS photo_group_accounts (
+                account_id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL,
+                quota_override INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS scheduled_posts (
@@ -246,6 +268,9 @@ def init_db() -> None:
                 postoria_post_id INTEGER,
                 status TEXT DEFAULT 'preview',
                 preview_batch_id TEXT,
+                photo_asset_id INTEGER,
+                photo_group_id INTEGER,
+                photo_assignment_state TEXT DEFAULT '',
                 error TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
@@ -288,18 +313,38 @@ def init_db() -> None:
         _ensure_column(conn, "accounts", "selected_for_schedule", "INTEGER DEFAULT 1")
         _ensure_column(conn, "account_groups", "color", "TEXT DEFAULT '#8b5cf6'")
         _ensure_column(conn, "account_groups", "strategy", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "photo_groups", "archived", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "photo_groups", "quota_mode", "TEXT DEFAULT 'global'")
+        _ensure_column(conn, "photo_groups", "global_quota", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "photo_groups", "spacing_percent", "INTEGER DEFAULT 20")
+        _ensure_column(conn, "photo_groups", "rotation_order", "TEXT DEFAULT '[]'")
+        _ensure_column(conn, "photo_groups", "rotation_used", "TEXT DEFAULT '[]'")
+        _ensure_column(conn, "photo_assets", "asset_key", "TEXT")
+        _ensure_column(conn, "photo_assets", "media_status", "TEXT DEFAULT 'pending_upload'")
+        _ensure_column(conn, "photo_assets", "media_error", "TEXT DEFAULT ''")
+        _ensure_column(conn, "photo_assets", "storage_path", "TEXT DEFAULT ''")
+        _ensure_column(conn, "photo_assets", "usage_count", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "photo_assets", "last_used_at", "TEXT")
+        _ensure_column(conn, "photo_assets", "archived", "INTEGER DEFAULT 0")
         _ensure_column(conn, "scheduled_posts", "media_ids", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "local_photo_asset_ids", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "content_type", "TEXT DEFAULT 'text'")
         _ensure_column(conn, "scheduled_posts", "variables_json", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "chain_replies", "TEXT DEFAULT ''")
         _ensure_column(conn, "scheduled_posts", "preview_batch_id", "TEXT")
+        _ensure_column(conn, "scheduled_posts", "photo_asset_id", "INTEGER")
+        _ensure_column(conn, "scheduled_posts", "photo_group_id", "INTEGER")
+        _ensure_column(conn, "scheduled_posts", "photo_assignment_state", "TEXT DEFAULT ''")
         _ensure_column(conn, "preview_batches", "name", "TEXT DEFAULT ''")
         _ensure_column(conn, "preview_batches", "status", "TEXT DEFAULT 'active'")
         _ensure_column(conn, "preview_batches", "updated_at", "TEXT")
         conn.execute(
             "INSERT OR IGNORE INTO account_groups (name, offset_minutes) VALUES ('tous', 0)"
         )
+        conn.execute(
+            "UPDATE photo_assets SET asset_key=lower(hex(randomblob(16))) WHERE asset_key IS NULL OR asset_key=''"
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_assets_asset_key ON photo_assets(asset_key)")
         conn.execute(
             """
             INSERT OR IGNORE INTO preview_batches (id, name, status)
@@ -652,34 +697,66 @@ def list_accounts() -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute("SELECT * FROM accounts ORDER BY name COLLATE NOCASE").fetchall()]
 
 
-def upsert_photo_group(name: str, note: str = "") -> int:
+def upsert_photo_group(
+    name: str,
+    note: str = "",
+    quota_mode: str | None = None,
+    global_quota: int | None = None,
+    spacing_percent: int | None = None,
+) -> int:
     clean_name = str(name or "").strip()
     if not clean_name:
         raise ValueError("Nom de groupe photo manquant.")
     with connect() as conn:
         conn.execute(
-            """
-            INSERT INTO photo_groups (name, note) VALUES (?, ?)
-            ON CONFLICT(name) DO UPDATE SET note=excluded.note
-            """,
+            "INSERT OR IGNORE INTO photo_groups (name, note) VALUES (?, ?)",
             (clean_name, str(note or "").strip()),
         )
+        updates = ["note=?", "archived=0"]
+        params: list[Any] = [str(note or "").strip()]
+        if quota_mode is not None:
+            updates.append("quota_mode=?")
+            params.append("per_account" if str(quota_mode) == "per_account" else "global")
+        if global_quota is not None:
+            updates.append("global_quota=?")
+            params.append(max(0, int(global_quota)))
+        if spacing_percent is not None:
+            updates.append("spacing_percent=?")
+            params.append(min(100, max(0, int(spacing_percent))))
+        params.append(clean_name)
+        conn.execute(f"UPDATE photo_groups SET {', '.join(updates)} WHERE name=?", tuple(params))
         row = conn.execute("SELECT id FROM photo_groups WHERE name=?", (clean_name,)).fetchone()
         return int(row["id"])
 
 
-def add_photo_asset(group_name: str, name: str, media_id: str, mime_type: str, image_bytes: bytes, note: str = "") -> int:
+def add_photo_asset(
+    group_name: str,
+    name: str,
+    media_id: str,
+    mime_type: str,
+    image_bytes: bytes,
+    note: str = "",
+    asset_key: str | None = None,
+    media_status: str | None = None,
+    storage_path: str = "",
+) -> int:
     group_id = upsert_photo_group(group_name or DEFAULT_PHOTO_GROUP)
+    clean_media_id = str(media_id or "").strip()
+    clean_status = str(media_status or ("ready" if clean_media_id else "pending_upload")).strip().lower()
     with connect() as conn:
         cursor = conn.execute(
             """
-            INSERT INTO photo_assets (group_id, name, media_id, mime_type, image_bytes, note)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO photo_assets
+            (group_id, asset_key, name, media_id, media_status, storage_path, mime_type, image_bytes, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 group_id,
+                str(asset_key or uuid.uuid4().hex),
                 str(name or "photo").strip(),
-                str(media_id or "").strip(),
+                clean_media_id,
+                clean_status,
+                str(storage_path or "").strip(),
                 str(mime_type or "image/jpeg").strip(),
                 image_bytes,
                 str(note or "").strip(),
@@ -688,7 +765,16 @@ def add_photo_asset(group_name: str, name: str, media_id: str, mime_type: str, i
         return int(cursor.lastrowid)
 
 
-def update_photo_asset(asset_id: int, group_name: str | None = None, media_id: str | None = None, note: str | None = None) -> None:
+def update_photo_asset(
+    asset_id: int,
+    group_name: str | None = None,
+    media_id: str | None = None,
+    note: str | None = None,
+    media_status: str | None = None,
+    media_error: str | None = None,
+    storage_path: str | None = None,
+    image_bytes: bytes | None = None,
+) -> None:
     updates: list[str] = []
     params: list[Any] = []
     if group_name is not None:
@@ -700,6 +786,18 @@ def update_photo_asset(asset_id: int, group_name: str | None = None, media_id: s
     if note is not None:
         updates.append("note=?")
         params.append(str(note or "").strip())
+    if media_status is not None:
+        updates.append("media_status=?")
+        params.append(str(media_status or "pending_upload").strip().lower())
+    if media_error is not None:
+        updates.append("media_error=?")
+        params.append(str(media_error or "").strip())
+    if storage_path is not None:
+        updates.append("storage_path=?")
+        params.append(str(storage_path or "").strip())
+    if image_bytes is not None:
+        updates.append("image_bytes=?")
+        params.append(image_bytes)
     if not updates:
         return
     params.append(int(asset_id))
@@ -707,33 +805,46 @@ def update_photo_asset(asset_id: int, group_name: str | None = None, media_id: s
         conn.execute(f"UPDATE photo_assets SET {', '.join(updates)} WHERE id=?", tuple(params))
 
 
-def list_photo_groups() -> list[dict[str, Any]]:
+def list_photo_groups(include_archived: bool = False) -> list[dict[str, Any]]:
+    where = "" if include_archived else "WHERE g.archived=0"
     with connect() as conn:
-        return [
-            dict(row)
-            for row in conn.execute(
-                """
-                SELECT g.*, COUNT(a.id) AS photo_count,
-                       SUM(CASE WHEN COALESCE(a.media_id, '') != '' THEN 1 ELSE 0 END) AS postoria_ready_count
+        rows = conn.execute(
+                f"""
+                SELECT g.*, COUNT(DISTINCT CASE WHEN a.archived=0 THEN a.id END) AS photo_count,
+                       SUM(CASE WHEN a.archived=0 AND a.media_status='ready' AND COALESCE(a.media_id, '') != '' THEN 1 ELSE 0 END) AS postoria_ready_count,
+                       COUNT(DISTINCT ga.account_id) AS account_count
                 FROM photo_groups g
                 LEFT JOIN photo_assets a ON a.group_id = g.id
+                LEFT JOIN photo_group_accounts ga ON ga.group_id = g.id
+                {where}
                 GROUP BY g.id
                 ORDER BY g.name COLLATE NOCASE
                 """
             ).fetchall()
-        ]
+        result = []
+        for row in rows:
+            data = dict(row)
+            data["rotation_order"] = parse_json_list(data.get("rotation_order"))
+            data["rotation_used"] = parse_json_list(data.get("rotation_used"))
+            result.append(data)
+        return result
 
 
-def list_photo_assets(group_name: str | None = None) -> list[dict[str, Any]]:
+def list_photo_assets(group_name: str | None = None, include_archived: bool = False) -> list[dict[str, Any]]:
     query = """
         SELECT a.*, g.name AS group_name
         FROM photo_assets a
         JOIN photo_groups g ON g.id = a.group_id
     """
     params: tuple[Any, ...] = ()
+    conditions = []
+    if not include_archived:
+        conditions.extend(["a.archived=0", "g.archived=0"])
     if group_name:
-        query += " WHERE g.name = ?"
+        conditions.append("g.name = ?")
         params = (str(group_name),)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY g.name COLLATE NOCASE, a.id DESC"
     with connect() as conn:
         return [dict(row) for row in conn.execute(query, params).fetchall()]
@@ -751,6 +862,279 @@ def get_photo_asset(asset_id: int) -> dict[str, Any] | None:
             (int(asset_id),),
         ).fetchone()
         return dict(row) if row else None
+
+
+def get_photo_asset_by_key(asset_key: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT a.*, g.name AS group_name
+            FROM photo_assets a
+            JOIN photo_groups g ON g.id = a.group_id
+            WHERE a.asset_key = ?
+            """,
+            (str(asset_key),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_photo_group_settings(
+    group_id: int,
+    name: str,
+    quota_mode: str,
+    global_quota: int,
+    spacing_percent: int,
+    note: str = "",
+) -> None:
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        raise ValueError("Nom du groupe photo manquant.")
+    with connect() as conn:
+        duplicate = conn.execute(
+            "SELECT id FROM photo_groups WHERE name=? AND id<>?",
+            (clean_name, int(group_id)),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("Un autre groupe photo utilise déjà ce nom.")
+        conn.execute(
+            """
+            UPDATE photo_groups
+            SET name=?, note=?, quota_mode=?, global_quota=?, spacing_percent=?
+            WHERE id=?
+            """,
+            (
+                clean_name,
+                str(note or "").strip(),
+                "per_account" if str(quota_mode) == "per_account" else "global",
+                max(0, int(global_quota)),
+                min(100, max(0, int(spacing_percent))),
+                int(group_id),
+            ),
+        )
+
+
+def archive_photo_group(group_id: int) -> None:
+    with connect() as conn:
+        conn.execute("UPDATE photo_groups SET archived=1 WHERE id=?", (int(group_id),))
+        conn.execute("DELETE FROM photo_group_accounts WHERE group_id=?", (int(group_id),))
+
+
+def archive_photo_asset(asset_id: int) -> None:
+    with connect() as conn:
+        conn.execute("UPDATE photo_assets SET archived=1 WHERE id=?", (int(asset_id),))
+
+
+def list_photo_group_accounts(group_id: int | None = None) -> list[dict[str, Any]]:
+    query = """
+        SELECT ga.account_id, ga.group_id, ga.quota_override, ga.updated_at,
+               a.name AS account_name, a.username, a.avatar_url,
+               g.name AS group_name
+        FROM photo_group_accounts ga
+        JOIN accounts a ON a.id = ga.account_id
+        JOIN photo_groups g ON g.id = ga.group_id
+    """
+    params: tuple[Any, ...] = ()
+    if group_id is not None:
+        query += " WHERE ga.group_id=?"
+        params = (int(group_id),)
+    query += " ORDER BY a.name COLLATE NOCASE"
+    with connect() as conn:
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+
+def photo_account_memberships() -> dict[int, dict[str, Any]]:
+    return {
+        int(row["account_id"]): row
+        for row in list_photo_group_accounts()
+    }
+
+
+def set_photo_group_accounts(group_id: int, quotas: dict[int, int]) -> list[dict[str, Any]]:
+    """Move selected accounts into one exclusive photo group and return prior memberships."""
+    clean_quotas = {int(account_id): max(0, int(quota)) for account_id, quota in quotas.items()}
+    moved: list[dict[str, Any]] = []
+    with connect() as conn:
+        for account_id, quota in clean_quotas.items():
+            previous = conn.execute(
+                """
+                SELECT ga.group_id, g.name AS group_name
+                FROM photo_group_accounts ga
+                JOIN photo_groups g ON g.id=ga.group_id
+                WHERE ga.account_id=?
+                """,
+                (account_id,),
+            ).fetchone()
+            if previous and int(previous["group_id"]) != int(group_id):
+                moved.append({"account_id": account_id, **dict(previous)})
+            conn.execute(
+                """
+                INSERT INTO photo_group_accounts (account_id, group_id, quota_override, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    group_id=excluded.group_id,
+                    quota_override=excluded.quota_override,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (account_id, int(group_id), quota),
+            )
+        if clean_quotas:
+            placeholders = ", ".join("?" for _ in clean_quotas)
+            conn.execute(
+                f"DELETE FROM photo_group_accounts WHERE group_id=? AND account_id NOT IN ({placeholders})",
+                (int(group_id), *clean_quotas.keys()),
+            )
+        else:
+            conn.execute("DELETE FROM photo_group_accounts WHERE group_id=?", (int(group_id),))
+    return moved
+
+
+def save_photo_rotation(group_id: int, order: list[str], used: list[str]) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE photo_groups SET rotation_order=?, rotation_used=? WHERE id=?",
+            (json.dumps(order, ensure_ascii=False), json.dumps(used, ensure_ascii=False), int(group_id)),
+        )
+
+
+def photo_planning_config() -> list[dict[str, Any]]:
+    groups = list_photo_groups()
+    assets_by_group: dict[int, list[dict[str, Any]]] = {}
+    for asset in list_photo_assets():
+        assets_by_group.setdefault(int(asset["group_id"]), []).append(asset)
+    accounts_by_group: dict[int, list[dict[str, Any]]] = {}
+    for account in list_photo_group_accounts():
+        accounts_by_group.setdefault(int(account["group_id"]), []).append(account)
+    return [
+        {
+            **group,
+            "assets": assets_by_group.get(int(group["id"]), []),
+            "accounts": accounts_by_group.get(int(group["id"]), []),
+        }
+        for group in groups
+        if str(group.get("name")) != DEFAULT_PHOTO_GROUP
+    ]
+
+
+def reserved_photo_asset_keys(exclude_scheduled_id: int | None = None) -> set[str]:
+    query = """
+        SELECT DISTINCT a.asset_key
+        FROM scheduled_posts s
+        JOIN photo_assets a ON a.id=s.photo_asset_id
+        WHERE s.photo_assignment_state='reserved'
+          AND s.status IN ('preview', 'preview_saved', 'failed', 'error', 'status_error')
+    """
+    params: tuple[Any, ...] = ()
+    if exclude_scheduled_id is not None:
+        query += " AND s.id<>?"
+        params = (int(exclude_scheduled_id),)
+    with connect() as conn:
+        return {str(row["asset_key"]) for row in conn.execute(query, params).fetchall()}
+
+
+def mark_photo_assignment_used(scheduled_id: int) -> None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT s.photo_asset_id, s.photo_group_id, s.photo_assignment_state,
+                   a.asset_key, g.rotation_used
+            FROM scheduled_posts s
+            LEFT JOIN photo_assets a ON a.id=s.photo_asset_id
+            LEFT JOIN photo_groups g ON g.id=s.photo_group_id
+            WHERE s.id=?
+            """,
+            (int(scheduled_id),),
+        ).fetchone()
+        if not row or not row["photo_asset_id"] or str(row["photo_assignment_state"]) == "used":
+            return
+        used = parse_json_list(row["rotation_used"])
+        asset_key = str(row["asset_key"] or "")
+        if asset_key and asset_key not in used:
+            used.append(asset_key)
+        conn.execute(
+            "UPDATE scheduled_posts SET photo_assignment_state='used' WHERE id=?",
+            (int(scheduled_id),),
+        )
+        conn.execute(
+            "UPDATE photo_assets SET usage_count=usage_count+1, last_used_at=CURRENT_TIMESTAMP WHERE id=?",
+            (int(row["photo_asset_id"]),),
+        )
+        conn.execute(
+            "UPDATE photo_groups SET rotation_used=? WHERE id=?",
+            (json.dumps(used, ensure_ascii=False), int(row["photo_group_id"])),
+        )
+
+
+def assign_scheduled_photo(scheduled_id: int, asset_id: int, group_id: int) -> None:
+    asset = get_photo_asset(int(asset_id))
+    if not asset or str(asset.get("media_status")) != "ready" or not str(asset.get("media_id") or "").strip():
+        raise ValueError("Cette photo n'est pas prête dans Postoria.")
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE scheduled_posts
+            SET media_ids=?, local_photo_asset_ids=?, content_type='image', photo_asset_id=?,
+                photo_group_id=?, photo_assignment_state='reserved'
+            WHERE id=? AND status='preview'
+            """,
+            (
+                serialize_media_ids([str(asset["media_id"])]),
+                serialize_int_ids([int(asset_id)]),
+                int(asset_id),
+                int(group_id),
+                int(scheduled_id),
+            ),
+        )
+
+
+def release_scheduled_photo(scheduled_id: int) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE scheduled_posts
+            SET media_ids='[]', local_photo_asset_ids='[]', content_type='text', photo_asset_id=NULL,
+                photo_group_id=NULL, photo_assignment_state='released'
+            WHERE id=? AND status='preview'
+            """,
+            (int(scheduled_id),),
+        )
+
+
+def move_scheduled_photo(source_id: int, target_id: int) -> None:
+    with connect() as conn:
+        source = conn.execute(
+            """
+            SELECT media_ids, local_photo_asset_ids, photo_asset_id, photo_group_id
+            FROM scheduled_posts WHERE id=? AND status='preview'
+            """,
+            (int(source_id),),
+        ).fetchone()
+        target = conn.execute(
+            "SELECT id FROM scheduled_posts WHERE id=? AND status='preview' AND photo_asset_id IS NULL",
+            (int(target_id),),
+        ).fetchone()
+        if not source or not source["photo_asset_id"] or not target:
+            raise ValueError("Déplacement impossible entre ces deux posts.")
+        conn.execute(
+            """
+            UPDATE scheduled_posts
+            SET media_ids=?, local_photo_asset_ids=?, content_type='image', photo_asset_id=?,
+                photo_group_id=?, photo_assignment_state='reserved'
+            WHERE id=?
+            """,
+            (
+                source["media_ids"], source["local_photo_asset_ids"], source["photo_asset_id"],
+                source["photo_group_id"], int(target_id),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE scheduled_posts
+            SET media_ids='[]', local_photo_asset_ids='[]', content_type='text', photo_asset_id=NULL,
+                photo_group_id=NULL, photo_assignment_state='released'
+            WHERE id=?
+            """,
+            (int(source_id),),
+        )
 
 
 def list_groups() -> list[dict[str, Any]]:
@@ -777,7 +1161,7 @@ def list_groups() -> list[dict[str, Any]]:
 
 
 def export_group_configuration() -> dict[str, list[dict[str, Any]]]:
-    """Return only the workspace-specific account configuration for remote backup."""
+    """Return workspace account and photo configuration for remote backup."""
     with connect() as conn:
         groups = [
             dict(row)
@@ -799,15 +1183,62 @@ def export_group_configuration() -> dict[str, list[dict[str, Any]]]:
                 """
             ).fetchall()
         ]
-    return {"groups": groups, "accounts": accounts}
+        photo_groups = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT name, note, archived, quota_mode, global_quota, spacing_percent,
+                       rotation_order, rotation_used
+                FROM photo_groups
+                ORDER BY name COLLATE NOCASE
+                """
+            ).fetchall()
+        ]
+        photo_assets = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT a.asset_key, a.name, a.media_id, a.media_status, a.media_error,
+                       a.storage_path, a.mime_type, a.note, a.usage_count, a.last_used_at,
+                       a.archived, g.name AS group_name
+                FROM photo_assets a
+                JOIN photo_groups g ON g.id=a.group_id
+                ORDER BY a.id
+                """
+            ).fetchall()
+        ]
+        photo_accounts = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT ga.account_id, ga.quota_override, g.name AS group_name
+                FROM photo_group_accounts ga
+                JOIN photo_groups g ON g.id=ga.group_id
+                ORDER BY ga.account_id
+                """
+            ).fetchall()
+        ]
+    return {
+        "groups": groups,
+        "accounts": accounts,
+        "photo_groups": photo_groups,
+        "photo_assets": photo_assets,
+        "photo_accounts": photo_accounts,
+    }
 
 
 def apply_group_configuration(configuration: dict[str, Any]) -> dict[str, int]:
     """Restore a remote group snapshot without reintroducing removed Postoria accounts."""
     raw_groups = configuration.get("groups") if isinstance(configuration, dict) else []
     raw_accounts = configuration.get("accounts") if isinstance(configuration, dict) else []
+    raw_photo_groups = configuration.get("photo_groups") if isinstance(configuration, dict) else []
+    raw_photo_assets = configuration.get("photo_assets") if isinstance(configuration, dict) else []
+    raw_photo_accounts = configuration.get("photo_accounts") if isinstance(configuration, dict) else []
     groups = raw_groups if isinstance(raw_groups, list) else []
     accounts = raw_accounts if isinstance(raw_accounts, list) else []
+    photo_groups = raw_photo_groups if isinstance(raw_photo_groups, list) else []
+    photo_assets = raw_photo_assets if isinstance(raw_photo_assets, list) else []
+    photo_accounts = raw_photo_accounts if isinstance(raw_photo_accounts, list) else []
     restored_groups = 0
     restored_accounts = 0
     with connect() as conn:
@@ -867,7 +1298,107 @@ def apply_group_configuration(configuration: dict[str, Any]) -> dict[str, int]:
                 ),
             )
             restored_accounts += 1
-    return {"groups": restored_groups, "accounts": restored_accounts}
+
+        photo_group_ids: dict[str, int] = {}
+        for raw_group in photo_groups:
+            if not isinstance(raw_group, dict):
+                continue
+            name = str(raw_group.get("name") or "").strip()
+            if not name:
+                continue
+            conn.execute(
+                """
+                INSERT INTO photo_groups
+                (name, note, archived, quota_mode, global_quota, spacing_percent, rotation_order, rotation_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    note=excluded.note,
+                    archived=excluded.archived,
+                    quota_mode=excluded.quota_mode,
+                    global_quota=excluded.global_quota,
+                    spacing_percent=excluded.spacing_percent,
+                    rotation_order=excluded.rotation_order,
+                    rotation_used=excluded.rotation_used
+                """,
+                (
+                    name,
+                    str(raw_group.get("note") or ""),
+                    int(bool(raw_group.get("archived", False))),
+                    "per_account" if str(raw_group.get("quota_mode")) == "per_account" else "global",
+                    max(0, int(raw_group.get("global_quota") or 0)),
+                    min(100, max(0, int(raw_group.get("spacing_percent") or 0))),
+                    str(raw_group.get("rotation_order") or "[]"),
+                    str(raw_group.get("rotation_used") or "[]"),
+                ),
+            )
+            row = conn.execute("SELECT id FROM photo_groups WHERE name=?", (name,)).fetchone()
+            if row:
+                photo_group_ids[name] = int(row["id"])
+
+        for raw_asset in photo_assets:
+            if not isinstance(raw_asset, dict):
+                continue
+            asset_key = str(raw_asset.get("asset_key") or "").strip()
+            group_name = str(raw_asset.get("group_name") or "").strip()
+            if not asset_key or group_name not in photo_group_ids:
+                continue
+            conn.execute(
+                """
+                INSERT INTO photo_assets
+                (group_id, asset_key, name, media_id, media_status, media_error, storage_path,
+                 mime_type, image_bytes, note, usage_count, last_used_at, archived)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+                ON CONFLICT(asset_key) DO UPDATE SET
+                    group_id=excluded.group_id,
+                    name=excluded.name,
+                    media_id=excluded.media_id,
+                    media_status=excluded.media_status,
+                    media_error=excluded.media_error,
+                    storage_path=excluded.storage_path,
+                    mime_type=excluded.mime_type,
+                    note=excluded.note,
+                    usage_count=excluded.usage_count,
+                    last_used_at=excluded.last_used_at,
+                    archived=excluded.archived
+                """,
+                (
+                    photo_group_ids[group_name], asset_key, str(raw_asset.get("name") or "photo"),
+                    str(raw_asset.get("media_id") or ""), str(raw_asset.get("media_status") or "pending_upload").lower(),
+                    str(raw_asset.get("media_error") or ""), str(raw_asset.get("storage_path") or ""),
+                    str(raw_asset.get("mime_type") or "image/jpeg"), str(raw_asset.get("note") or ""),
+                    max(0, int(raw_asset.get("usage_count") or 0)), raw_asset.get("last_used_at"),
+                    int(bool(raw_asset.get("archived", False))),
+                ),
+            )
+
+        conn.execute("DELETE FROM photo_group_accounts")
+        for raw_membership in photo_accounts:
+            if not isinstance(raw_membership, dict):
+                continue
+            try:
+                account_id = int(raw_membership.get("account_id"))
+            except (TypeError, ValueError):
+                continue
+            group_name = str(raw_membership.get("group_name") or "").strip()
+            if account_id not in existing_ids or group_name not in photo_group_ids:
+                continue
+            conn.execute(
+                """
+                INSERT INTO photo_group_accounts (account_id, group_id, quota_override)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    account_id,
+                    photo_group_ids[group_name],
+                    max(0, int(raw_membership.get("quota_override") or 0)),
+                ),
+            )
+    return {
+        "groups": restored_groups,
+        "accounts": restored_accounts,
+        "photo_groups": len(photo_group_ids),
+        "photo_assets": len(photo_assets),
+    }
 
 
 def upsert_group(name: str, offset_minutes: int = 0, color: str = "#8b5cf6") -> bool:
@@ -965,15 +1496,18 @@ def save_preview(rows: list[dict[str, Any]], name: str | None = None) -> str:
                 """
                 INSERT INTO scheduled_posts
                 (library_post_id, caption_hash, caption, account_id, account_name, group_name,
-                 scheduled_time_local, scheduled_time_utc, media_ids, local_photo_asset_ids, content_type, variables_json, chain_replies, status, preview_batch_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'preview', ?)
+                 scheduled_time_local, scheduled_time_utc, media_ids, local_photo_asset_ids, content_type,
+                 variables_json, chain_replies, status, preview_batch_id, photo_asset_id, photo_group_id,
+                 photo_assignment_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'preview', ?, ?, ?, ?)
                 """,
                 (
                     r["library_post_id"], r["caption_hash"], r["caption"], r["account_id"],
                     r["account_name"], r.get("group_name"), r["scheduled_time_local"], r["scheduled_time_utc"],
                     serialize_media_ids(r.get("media_ids", [])), serialize_int_ids(r.get("local_photo_asset_ids", [])), r.get("content_type", "text"),
                     serialize_json_map(r.get("variables", {})), serialize_lines(r.get("chain_replies", [])),
-                    batch_id,
+                    batch_id, r.get("photo_asset_id"), r.get("photo_group_id"),
+                    str(r.get("photo_assignment_state") or ""),
                 ),
             )
     return batch_id
@@ -1113,6 +1647,55 @@ def update_scheduled_result(local_id: int, postoria_post_id: int | None, status:
             "UPDATE scheduled_posts SET postoria_post_id=?, status=?, error=? WHERE id=?",
             (postoria_post_id, status, error, local_id),
         )
+
+
+def next_available_photo_asset(
+    group_id: int,
+    exclude_scheduled_id: int | None = None,
+    exclude_asset_id: int | None = None,
+) -> dict[str, Any] | None:
+    group = next((item for item in list_photo_groups() if int(item["id"]) == int(group_id)), None)
+    if not group:
+        return None
+    assets = [
+        asset for asset in list_photo_assets()
+        if int(asset["group_id"]) == int(group_id)
+        and str(asset.get("media_status")) == "ready"
+        and str(asset.get("media_id") or "").strip()
+    ]
+    by_key = {str(asset["asset_key"]): asset for asset in assets}
+    order = [key for key in group.get("rotation_order", []) if key in by_key]
+    missing = [key for key in by_key if key not in order]
+    order.extend(missing)
+    used = {str(key) for key in group.get("rotation_used", [])}
+    if by_key and set(by_key).issubset(used):
+        used = set()
+        save_photo_rotation(int(group_id), order, [])
+    reserved = reserved_photo_asset_keys(exclude_scheduled_id)
+    for key in order:
+        if key not in used and key not in reserved and int(by_key[key]["id"]) != int(exclude_asset_id or 0):
+            return by_key[key]
+    return None
+
+
+def photo_analytics_rows() -> list[dict[str, Any]]:
+    with connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT s.id, s.account_id, s.account_name, s.scheduled_time_local,
+                       s.status AS post_status, s.photo_assignment_state,
+                       a.id AS photo_asset_id, a.asset_key, a.name AS photo_name,
+                       a.usage_count, a.media_status, g.id AS photo_group_id,
+                       g.name AS photo_group_name
+                FROM scheduled_posts s
+                JOIN photo_assets a ON a.id=s.photo_asset_id
+                JOIN photo_groups g ON g.id=s.photo_group_id
+                ORDER BY s.scheduled_time_local DESC
+                """
+            ).fetchall()
+        ]
 
 
 def list_scheduled(status: str | None = None) -> list[dict[str, Any]]:

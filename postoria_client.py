@@ -8,9 +8,9 @@ load_dotenv()
 
 
 class PostoriaClient:
-    def __init__(self) -> None:
-        self.api_key = os.getenv("POSTORIA_API_KEY", "").strip()
-        self.base_url = os.getenv("POSTORIA_BASE_URL", "https://api.postoria.io/v1").rstrip("/")
+    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
+        self.api_key = str(api_key if api_key is not None else os.getenv("POSTORIA_API_KEY", "")).strip()
+        self.base_url = str(base_url if base_url is not None else os.getenv("POSTORIA_BASE_URL", "https://api.postoria.io/v1")).rstrip("/")
         if not self.api_key:
             raise RuntimeError("POSTORIA_API_KEY manquant dans .env")
 
@@ -34,6 +34,13 @@ class PostoriaClient:
             message = data.get("error", {}).get("message") or str(data)
             raise RuntimeError(f"Postoria API error {res.status_code}: {message}")
         return data
+
+    @staticmethod
+    def _data_payload(response: dict | None) -> dict:
+        if not isinstance(response, dict):
+            return {}
+        data = response.get("data")
+        return data if isinstance(data, dict) else response
 
     def list_workspaces(self) -> list[dict]:
         return self._request("GET", "/workspaces").get("data", [])
@@ -71,3 +78,53 @@ class PostoriaClient:
 
     def get_post(self, workspace_id: int, post_id: int) -> dict:
         return self._request("GET", f"/workspaces/{workspace_id}/posts/{post_id}")
+
+    def create_media_upload(self, workspace_id: int, name: str, content_type: str) -> dict:
+        return self._data_payload(
+            self._request(
+                "POST",
+                f"/workspaces/{int(workspace_id)}/media/uploads",
+                json={"name": str(name), "content_type": str(content_type)},
+            )
+        )
+
+    def complete_media_upload(self, workspace_id: int, media_id: int | str) -> dict:
+        return self._data_payload(
+            self._request(
+                "POST",
+                f"/workspaces/{int(workspace_id)}/media/{media_id}/complete",
+                json={},
+            )
+        )
+
+    def get_media(self, workspace_id: int, media_id: int | str) -> dict:
+        return self._data_payload(
+            self._request("GET", f"/workspaces/{int(workspace_id)}/media/{media_id}")
+        )
+
+    def upload_media(
+        self,
+        workspace_id: int,
+        name: str,
+        content_type: str,
+        file_bytes: bytes,
+    ) -> dict:
+        created = self.create_media_upload(int(workspace_id), name, content_type)
+        media_id = created.get("id") if isinstance(created, dict) else None
+        upload_url = created.get("upload", {}).get("url") if isinstance(created, dict) else None
+        if not media_id or not upload_url:
+            raise RuntimeError(f"Réponse upload Postoria incomplète: {created}")
+        response = requests.put(
+            str(upload_url),
+            data=file_bytes,
+            headers={"Content-Type": str(content_type)},
+            timeout=90,
+        )
+        response.raise_for_status()
+        completed = self.complete_media_upload(int(workspace_id), media_id)
+        result = {"id": media_id, "status": "processing"}
+        if isinstance(completed, dict):
+            result.update(completed)
+        if not result.get("id"):
+            result["id"] = media_id
+        return result

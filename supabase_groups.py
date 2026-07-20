@@ -33,6 +33,10 @@ class SupabaseGroupStore:
             "Content-Type": "application/json",
         }
 
+    @property
+    def photo_bucket(self) -> str:
+        return "postoria-photo-library"
+
     def load(self, workspace_id: str) -> dict[str, Any] | None:
         if not self.configured:
             return None
@@ -72,3 +76,64 @@ class SupabaseGroupStore:
             response.raise_for_status()
         except requests.RequestException as exc:
             raise GroupStoreError(f"Impossible de sauvegarder les groupes dans Supabase : {exc}") from exc
+
+    def ensure_photo_bucket(self) -> None:
+        if not self.configured:
+            return
+        try:
+            current = requests.get(
+                f"{self.base_url}/storage/v1/bucket/{self.photo_bucket}",
+                headers=self._headers,
+                timeout=15,
+            )
+            if current.status_code == 200:
+                return
+            if current.status_code != 404:
+                current.raise_for_status()
+            response = requests.post(
+                f"{self.base_url}/storage/v1/bucket",
+                headers=self._headers,
+                json={"id": self.photo_bucket, "name": self.photo_bucket, "public": False},
+                timeout=15,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise GroupStoreError(f"Bucket photos Supabase indisponible : {exc}") from exc
+
+    def upload_photo(self, workspace_id: str, asset_key: str, name: str, content_type: str, data: bytes) -> str:
+        if not self.configured:
+            return ""
+        self.ensure_photo_bucket()
+        suffix = str(name or "photo").rsplit(".", 1)[-1].lower()
+        suffix = suffix if suffix in {"jpg", "jpeg", "png", "webp", "gif"} else "jpg"
+        path = f"{workspace_id}/{asset_key}.{suffix}"
+        headers = {
+            **self._headers,
+            "Content-Type": str(content_type or "image/jpeg"),
+            "x-upsert": "true",
+        }
+        try:
+            response = requests.post(
+                f"{self.base_url}/storage/v1/object/{self.photo_bucket}/{path}",
+                headers=headers,
+                data=data,
+                timeout=60,
+            )
+            response.raise_for_status()
+            return path
+        except requests.RequestException as exc:
+            raise GroupStoreError(f"Upload photo Supabase impossible : {exc}") from exc
+
+    def download_photo(self, path: str) -> bytes:
+        if not self.configured or not str(path or "").strip():
+            return b""
+        try:
+            response = requests.get(
+                f"{self.base_url}/storage/v1/object/{self.photo_bucket}/{str(path).lstrip('/')}",
+                headers=self._headers,
+                timeout=45,
+            )
+            response.raise_for_status()
+            return response.content
+        except requests.RequestException as exc:
+            raise GroupStoreError(f"Lecture photo Supabase impossible : {exc}") from exc

@@ -6,10 +6,15 @@ Application locale Streamlit pour programmer automatiquement des posts Threads v
 
 - Import CSV avec `text` recommandé, `caption` compatible, ou première colonne utilisée par défaut
 - Variables CSV avec `{nom_colonne}` dans les textes
-- Dossiers média avec sélection aléatoire d'un `media_id`
+- Page Photos séparée avec groupes photo indépendants des groupes de comptes
+- Quota photo global ou différent par compte, répété pour chaque jour planifié
+- Rotation persistante: toutes les photos prêtes sont parcourues avant réutilisation
+- Espacement minimum des photos exprimé en pourcentage des posts du compte
+- Upload automatique vers Postoria et sauvegarde des fichiers dans Supabase Storage
+- Retrait, remplacement et déplacement d'une photo directement dans la preview
 - Thread chains en preview via colonnes `reply_1`, `reply_2`, etc.
 - Bibliothèque locale de posts SQLite
-- Sélection manuelle des posts et des photos/media IDs
+- Sélection manuelle des posts; les photos sont attribuées depuis leur groupe dédié
 - Récupération des comptes Threads depuis Postoria
 - Sélection des comptes dans un tableau type Postoria
 - Groupes libres directement dans le tableau comptes
@@ -20,7 +25,6 @@ Application locale Streamlit pour programmer automatiquement des posts Threads v
 - Mode exact ou range pour le nombre de posts par compte
 - Preview tableau + calendrier visuel
 - Mode dry-run
-- Confirmation obligatoire avant programmation réelle
 - Programmation via API Postoria
 - Vérification des statuts
 - Suppression des posts programmés
@@ -46,7 +50,7 @@ APP_TIMEZONE=Europe/Brussels
 
 Important : ne mets jamais `.env` sur GitHub.
 
-### Groupes persistants sur Streamlit Cloud (optionnel)
+### Groupes et photos persistants sur Streamlit Cloud (optionnel)
 
 Sur Streamlit Community Cloud, le fichier SQLite local peut être recréé après un redéploiement ou un redémarrage. Pour conserver les groupes, leurs couleurs et l'appartenance de chaque compte, crée un projet Supabase puis exécute une fois cette requête dans le SQL Editor :
 
@@ -67,7 +71,7 @@ SUPABASE_URL = "https://ton-projet.supabase.co"
 SUPABASE_SERVICE_KEY = "ta_service_role_key"
 ```
 
-Après avoir choisi le workspace, clique sur **Charger comptes Threads** : l'app récupère les comptes Postoria, puis restaure les groupes sauvegardés pour ce workspace. Sans ces secrets, l'application continue de fonctionner avec la base SQLite locale.
+Après avoir choisi le workspace, clique sur **Charger comptes Threads** : l'app récupère les comptes Postoria, puis restaure les groupes, leurs règles et la bibliothèque photo pour ce workspace. Le bucket privé `postoria-photo-library` est créé automatiquement avec la clé `service_role`. Sans ces secrets, l'application continue de fonctionner avec la base SQLite locale, mais les fichiers photo ne survivent pas forcément à un redéploiement Streamlit Cloud.
 
 ## Lancement
 
@@ -103,8 +107,9 @@ Si `media_ids` est vide et `media_folder` rempli, l'app prend un media ID au has
 - Un même texte ne peut pas être utilisé deux fois sur le même compte le même jour
 - Optionnel : un même texte peut être bloqué sur plusieurs comptes pendant une fenêtre réglable
 - Si le timeframe est trop court, l'app refuse
+- Une photo en preview est réservée. Elle n'est comptée comme utilisée qu'après acceptation du post par Postoria.
+- Une erreur d'envoi garde la photo réservée pour le retry; la retirer ou la remplacer la rend disponible.
 - Les horaires Europe/Brussels sont convertis en UTC pour Postoria
-- L'envoi réel demande de cocher comptes, posts/photos, horaires, puis de taper `DEMARRER`
 
 ## Note sécurité
 

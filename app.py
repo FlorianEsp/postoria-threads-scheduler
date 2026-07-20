@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 import db
 from postoria_client import PostoriaClient
+from photo_scheduler import assign_photos_to_schedule
 from scheduler import generate_schedule
 from supabase_groups import GroupStoreError, SupabaseGroupStore
 
@@ -65,6 +66,102 @@ def persist_group_config_if_needed(force: bool = False) -> bool:
     except GroupStoreError as exc:
         st.session_state["remote_group_config_error"] = str(exc)
         return False
+
+
+def persist_photo_library() -> tuple[int, list[str]]:
+    """Upload new local photos to Supabase Storage, then save all photo metadata."""
+    workspace_id = str(st.session_state.get("workspace_id") or "").strip()
+    if not GROUP_STORE.configured or not workspace_id:
+        return 0, []
+    uploaded = 0
+    errors: list[str] = []
+    for asset in db.list_photo_assets(include_archived=True):
+        if str(asset.get("storage_path") or "").strip() or not asset.get("image_bytes"):
+            continue
+        try:
+            path = GROUP_STORE.upload_photo(
+                workspace_id,
+                str(asset.get("asset_key") or asset["id"]),
+                str(asset.get("name") or "photo.jpg"),
+                str(asset.get("mime_type") or "image/jpeg"),
+                bytes(asset["image_bytes"]),
+            )
+            db.update_photo_asset(int(asset["id"]), storage_path=path)
+            uploaded += 1
+        except GroupStoreError as exc:
+            errors.append(str(exc))
+    mark_group_config_dirty()
+    persist_group_config_if_needed(force=True)
+    return uploaded, errors
+
+
+def restore_photo_bytes_from_supabase() -> tuple[int, list[str]]:
+    workspace_id = str(st.session_state.get("workspace_id") or "").strip()
+    if not GROUP_STORE.configured or not workspace_id:
+        return 0, []
+    restored = 0
+    errors: list[str] = []
+    for asset in db.list_photo_assets(include_archived=True):
+        if asset.get("image_bytes") or not str(asset.get("storage_path") or "").strip():
+            continue
+        try:
+            image_bytes = GROUP_STORE.download_photo(str(asset["storage_path"]))
+            if image_bytes:
+                db.update_photo_asset(int(asset["id"]), image_bytes=image_bytes)
+                restored += 1
+        except GroupStoreError as exc:
+            errors.append(str(exc))
+    return restored, errors
+
+
+def upload_photo_asset_to_postoria(client: PostoriaClient, workspace_id: int | str, asset: dict) -> dict:
+    db.update_photo_asset(int(asset["id"]), media_status="uploading", media_error="")
+    try:
+        response = client.upload_media(
+            int(workspace_id),
+            str(asset.get("name") or "photo.jpg"),
+            str(asset.get("mime_type") or "image/jpeg"),
+            bytes(asset.get("image_bytes") or b""),
+        )
+        media_id = str(response.get("id") or "").strip()
+        media_status = str(response.get("status") or "processing").strip().lower()
+        db.update_photo_asset(
+            int(asset["id"]),
+            media_id=media_id,
+            media_status=media_status,
+            media_error=str(response.get("error_message") or ""),
+        )
+        return response
+    except Exception as exc:
+        db.update_photo_asset(int(asset["id"]), media_status="failed", media_error=short_debug(exc))
+        raise
+
+
+def refresh_photo_media_statuses(client: PostoriaClient, workspace_id: int | str) -> tuple[int, int]:
+    checked = 0
+    errors = 0
+    for asset in db.list_photo_assets():
+        media_id = str(asset.get("media_id") or "").strip()
+        if str(asset.get("media_status")) == "ready":
+            continue
+        try:
+            if not media_id:
+                if not asset.get("image_bytes"):
+                    raise RuntimeError("Fichier photo local indisponible pour retenter l'upload.")
+                upload_photo_asset_to_postoria(client, workspace_id, asset)
+            else:
+                response = client.get_media(int(workspace_id), media_id)
+                db.update_photo_asset(
+                    int(asset["id"]),
+                    media_status=str(response.get("status") or "processing").strip().lower(),
+                    media_error=str(response.get("error_message") or ""),
+                )
+            checked += 1
+        except Exception as exc:
+            db.update_photo_asset(int(asset["id"]), media_status="failed", media_error=short_debug(exc))
+            errors += 1
+    persist_photo_library()
+    return checked, errors
 
 
 def media_ids_text(value) -> str:
@@ -606,11 +703,11 @@ def render_preview_media_tools(preview_rows: list[dict]) -> None:
     rows = [row for row in preview_rows if str(row.get("status")) == "preview"]
     if not rows:
         return
-    with st.expander("Photos sur une ligne preview", expanded=False):
-        st.caption("Choisis un post précis. Le + ajoute une photo, le - retire les photos de cette ligne. Rien n'est envoyé à Postoria avant l'étape Envoi.")
+    with st.expander("Modifier les photos de la preview", expanded=False):
+        st.caption("Retire, remplace ou déplace une photo. La rotation ne considère une photo comme utilisée qu'après acceptation par Postoria.")
         options = [int(row["id"]) for row in rows]
         picked_id = choose_option(
-            "Post preview",
+            "Post à modifier",
             options,
             format_func=lambda row_id: next(
                 f"{str(row.get('scheduled_time_local'))[:16]} · {row.get('account_name')} · {str(row.get('caption'))[:70]}"
@@ -620,84 +717,68 @@ def render_preview_media_tools(preview_rows: list[dict]) -> None:
             key="preview_media_target",
         )
         picked_row = next((row for row in rows if int(row["id"]) == int(picked_id)), None)
-        current_media = list(picked_row.get("media_ids") or []) if picked_row else []
-        current_local = list(picked_row.get("local_photo_asset_ids") or []) if picked_row else []
-        st.caption(f"Actuel: {len(current_media)} media IDs Postoria, {len(current_local)} photos locales.")
-        remove_col, add_col = st.columns([1, 2])
-        with remove_col:
-            if st.button("- Retirer photos", disabled=not picked_row or (not current_media and not current_local), use_container_width=True):
-                db.update_scheduled_media(int(picked_id), [], [])
-                st.warning("Photos retirées de cette ligne preview. Rien supprimé dans les groupes photos.")
-                st.rerun()
-        with add_col:
-            add_mode = st.radio(
-                "+ Ajouter",
-                ["Photo précise", "Random groupe", "Media ID manuel"],
-                horizontal=True,
-                key="preview_add_photo_mode",
-            )
-            photo_assets = db.list_photo_assets()
-            photo_groups = db.list_photo_groups()
-            selected_asset = None
-            manual_media_ids = ""
-            if add_mode == "Photo précise":
-                ready_assets = photo_assets
-                if ready_assets:
-                    asset_id = choose_option(
-                        "Choisir photo",
-                        [int(asset["id"]) for asset in ready_assets],
-                        format_func=lambda aid: next(
-                            f"{asset['group_name']} / {asset['name']} / media:{asset.get('media_id') or 'manquant'}"
-                            for asset in ready_assets
-                            if int(asset["id"]) == int(aid)
-                        ),
-                        key="preview_precise_photo_asset",
-                    )
-                    selected_asset = next((asset for asset in ready_assets if int(asset["id"]) == int(asset_id)), None)
-                else:
-                    st.info("Aucune photo locale. Ajoute des photos dans 3. Posts/photos.")
-            elif add_mode == "Random groupe":
-                group_names = [group["name"] for group in photo_groups if int(group.get("photo_count") or 0) > 0]
-                if group_names:
-                    group_name = choose_option("Groupe photo", group_names, key="preview_random_photo_group")
-                    candidates = db.list_photo_assets(str(group_name))
-                    if candidates:
-                        selected_asset = random.choice(candidates)
-                        st.caption(f"Random prêt: {selected_asset['name']} / media:{selected_asset.get('media_id') or 'manquant'}")
-                else:
-                    st.info("Aucun groupe photo avec image.")
-            else:
-                manual_media_ids = st.text_input("Media IDs à ajouter", placeholder="12345, 67890", key="preview_manual_media_ids")
+        if not picked_row:
+            return
 
-            if st.button("+ Ajouter photo", disabled=not picked_row, use_container_width=True):
-                new_media = list(current_media)
-                new_local = list(current_local)
-                if add_mode in ("Photo précise", "Random groupe"):
-                    if not selected_asset:
-                        st.error("Choisis une photo avant d'ajouter.")
-                    else:
-                        asset_id = int(selected_asset["id"])
-                        if asset_id not in new_local:
-                            new_local.append(asset_id)
-                        media_id = str(selected_asset.get("media_id") or "").strip()
-                        if media_id and media_id not in new_media:
-                            new_media.append(media_id)
-                        if not media_id:
-                            st.warning("Photo ajoutée en aperçu local, mais sans media ID Postoria elle ne partira pas à l'envoi.")
-                        db.update_scheduled_media(int(picked_id), new_media, new_local)
-                        st.success("Photo ajoutée à cette ligne preview.")
-                        st.rerun()
+        current_asset_id = int(picked_row.get("photo_asset_id") or 0)
+        current_asset = db.get_photo_asset(current_asset_id) if current_asset_id else None
+        membership = db.photo_account_memberships().get(int(picked_row["account_id"]))
+        target_group_id = int(
+            picked_row.get("photo_group_id")
+            or (membership.get("group_id") if membership else 0)
+            or 0
+        )
+        if current_asset:
+            preview_a, preview_b = st.columns([1, 2.3], gap="medium")
+            with preview_a:
+                if current_asset.get("image_bytes"):
+                    st.image(current_asset["image_bytes"], use_column_width=True)
+            with preview_b:
+                st.markdown(f"**{current_asset['name']}**")
+                st.caption(f"Groupe photo : {current_asset['group_name']} · état : réservée")
+
+        action_remove, action_replace = st.columns(2, gap="medium")
+        with action_remove:
+            if st.button("Retirer la photo", disabled=not current_asset, use_container_width=True):
+                db.release_scheduled_photo(int(picked_id))
+                st.success("Photo retirée et rendue disponible dans la rotation.")
+                st.rerun()
+        with action_replace:
+            if st.button("Remplacer par la suivante", disabled=not target_group_id, use_container_width=True):
+                replacement = db.next_available_photo_asset(
+                    target_group_id,
+                    exclude_scheduled_id=int(picked_id),
+                    exclude_asset_id=current_asset_id or None,
+                )
+                if not replacement:
+                    st.warning("Aucune autre photo prête et disponible dans ce groupe.")
                 else:
-                    added_media = db.parse_media_ids(manual_media_ids)
-                    if not added_media:
-                        st.error("Ajoute au moins un media ID.")
-                    else:
-                        for media_id in added_media:
-                            if media_id not in new_media:
-                                new_media.append(media_id)
-                        db.update_scheduled_media(int(picked_id), new_media, new_local)
-                        st.success("Media ID ajouté à cette ligne preview.")
-                        st.rerun()
+                    db.assign_scheduled_photo(int(picked_id), int(replacement["id"]), target_group_id)
+                    st.success(f"Photo remplacée par {replacement['name']}.")
+                    st.rerun()
+
+        same_day = str(picked_row.get("scheduled_time_local") or "")[:10]
+        move_targets = [
+            row for row in rows
+            if int(row["id"]) != int(picked_id)
+            and int(row.get("account_id") or 0) == int(picked_row.get("account_id") or 0)
+            and str(row.get("scheduled_time_local") or "")[:10] == same_day
+            and not row.get("photo_asset_id")
+        ]
+        if current_asset and move_targets:
+            target_id = choose_option(
+                "Déplacer vers un autre post du même compte et du même jour",
+                [int(row["id"]) for row in move_targets],
+                format_func=lambda row_id: next(
+                    f"{str(row.get('scheduled_time_local'))[11:16]} · {str(row.get('caption'))[:85]}"
+                    for row in move_targets if int(row["id"]) == int(row_id)
+                ),
+                key=f"preview_photo_move_target_{picked_id}",
+            )
+            if st.button("Déplacer la photo", key=f"preview_photo_move_{picked_id}", use_container_width=True):
+                db.move_scheduled_photo(int(picked_id), int(target_id))
+                st.success("Photo déplacée sans modifier le quota du compte.")
+                st.rerun()
 
 
 def is_failed_status(row: dict) -> bool:
@@ -1008,6 +1089,7 @@ def retry_failed_posts_direct(
             if postoria_id is None:
                 raise RuntimeError(f"Réponse Postoria sans post id: {short_debug(res)}")
             db.update_scheduled_result(row["id"], postoria_id, postoria_status, None)
+            db.mark_photo_assignment_used(int(row["id"]))
             sent_count += 1
         except Exception as e:
             failed_count += 1
@@ -1194,11 +1276,6 @@ def render_post_library_workspace() -> None:
         st.session_state["_selected_posts_signature"] = tuple()
         st.session_state["post_library_selection_defaults_v2"] = True
 
-    if not batches and not all_posts:
-        st.markdown("<div class='post-library-workspace'></div>", unsafe_allow_html=True)
-        st.info("Importe un premier CSV ou crée un post pour démarrer la bibliothèque.")
-        return
-
     batch_ids = [str(batch["id"]) for batch in batches]
     valid_views = {"all", "favorites", *batch_ids}
     active_batch_id = str(st.session_state.get("post_library_batch_id") or "all")
@@ -1241,7 +1318,7 @@ def render_post_library_workspace() -> None:
         visible_posts = [post for post in all_posts if int(post["id"]) in current_batch_ids]
 
     import_notice = str(st.session_state.pop("post_library_import_notice", "") or "").strip()
-    page_size = 18
+    page_size = 12
     page_key = f"post_library_page_{active_batch_id}"
     page_count = max(1, (len(visible_posts) + page_size - 1) // page_size)
     current_page = max(1, min(int(st.session_state.get(page_key, 1) or 1), page_count))
@@ -1259,170 +1336,222 @@ def render_post_library_workspace() -> None:
     if import_notice:
         st.success(import_notice)
 
-    finder_col, list_col = st.columns([1.05, 3.95], gap="medium")
-    with finder_col:
-        with st.container(border=True):
-            st.markdown("<div class='post-library-finder-title'>BIBLIOTHÈQUE</div>", unsafe_allow_html=True)
-            with st.expander("Importer un CSV", expanded=False):
-                uploaded_files = st.file_uploader(
-                    "Fichiers CSV",
-                    type=["csv"],
-                    accept_multiple_files=True,
-                    key="library_csv_upload",
-                    label_visibility="collapsed",
-                )
-                if st.button("Importer", disabled=not uploaded_files, type="primary", key="library_import_csv", use_container_width=True):
-                    existing_hashes = {str(batch.get("file_hash") or "") for batch in db.list_post_import_batches()}
-                    latest_batch_id = ""
-                    imported_post_ids: set[int] = set()
-                    summaries: list[str] = []
-                    errors: list[str] = []
-                    with st.spinner("Import des CSV en cours..."):
-                        for uploaded in uploaded_files or []:
-                            raw = uploaded.getvalue()
-                            file_hash = hashlib.sha256(raw).hexdigest()
-                            if file_hash in existing_hashes:
-                                summaries.append(f"{uploaded.name}: déjà présent")
-                                continue
-                            try:
-                                records = parse_post_csv(raw, uploaded.name)
-                                added, skipped, post_ids = db.add_posts_with_ids(records)
-                                latest_batch_id = db.record_post_import_batch(
-                                    uploaded.name, file_hash, len(raw), added, skipped, post_ids,
-                                )
-                                imported_post_ids.update(int(post_id) for post_id in post_ids)
-                                summaries.append(f"{uploaded.name}: {added} ajoutés, {skipped} ignorés")
-                            except (OSError, ValueError, pd.errors.ParserError) as exc:
-                                errors.append(f"{uploaded.name}: {exc}")
-                    if latest_batch_id:
-                        st.session_state["post_library_batch_id"] = latest_batch_id
-                        st.session_state["post_import_batch_filter"] = latest_batch_id
-                        persist_selection(selected_ids | imported_post_ids)
-                        st.session_state["post_library_import_notice"] = " | ".join(summaries)
-                        if errors:
-                            st.session_state["post_library_import_notice"] += f". {len(errors)} fichier(s) non importé(s)."
-                        st.rerun()
-                    if errors:
-                        st.error(" | ".join(errors))
-                    if summaries and not latest_batch_id:
-                        st.info(" | ".join(summaries))
+    def compact_source_label(value: object, max_length: int = 30) -> str:
+        label = str(value or "CSV").strip() or "CSV"
+        if len(label) <= max_length:
+            return label
+        return f"{label[:max_length - 10]}…{label[-9:]}"
 
-            if st.button("Nouveau post", key="library_open_new_post", use_container_width=True):
-                st.session_state["post_library_new_post"] = True
+    active_source_name = "Tous les posts"
+    if active_batch_id == "favorites":
+        active_source_name = "Favoris"
+    elif active_batch_id not in {"all", "favorites"}:
+        active_batch = next((batch for batch in batches if str(batch["id"]) == active_batch_id), None)
+        if active_batch:
+            active_source_name = str(active_batch.get("file_name") or active_batch.get("name") or "CSV")
+
+    finder_col, list_col = st.columns([0.78, 4.22], gap="large")
+    with finder_col:
+        st.markdown(
+            "<div class='post-library-source-rail'>"
+            "<span>BIBLIOTHÈQUE</span><strong>Sources</strong>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Importer un CSV", key="library_open_import", use_container_width=True):
+            st.session_state["post_library_import_open"] = True
+            st.rerun()
+        if st.button("Nouveau post", key="library_open_new_post", use_container_width=True):
+            st.session_state["post_library_new_post"] = True
+            st.rerun()
+
+        finder_buttons = [
+            ("all", f"Tous les posts · {len(all_posts)}"),
+            ("favorites", f"Favoris · {sum(1 for post in all_posts if bool(post.get('is_favorite')))}"),
+        ]
+        for view_id, label in finder_buttons:
+            if st.button(
+                label,
+                key=f"library_view_{view_id}",
+                type="primary" if active_batch_id == view_id else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state["post_library_batch_id"] = view_id
                 st.rerun()
 
-            finder_buttons = [
-                ("all", f"Tous les posts ({len(all_posts)})"),
-                ("favorites", f"Favoris ({sum(1 for post in all_posts if bool(post.get('is_favorite')))})"),
-            ]
-            for view_id, label in finder_buttons:
-                if st.button(label, key=f"library_view_{view_id}", type="primary" if active_batch_id == view_id else "secondary", use_container_width=True):
-                    st.session_state["post_library_batch_id"] = view_id
-                    st.rerun()
-
-            st.markdown("<div class='post-library-finder-title is-subtitle'>IMPORTS CSV</div>", unsafe_allow_html=True)
+        with st.expander(f"Imports CSV · {len(batches)}", expanded=active_batch_id not in {"all", "favorites"}):
             for batch in batches:
                 batch_id = str(batch["id"])
                 batch_ids_for_row = batch_post_ids(batch_id)
                 checked_count = len(batch_ids_for_row & selected_ids)
-                label = f"{batch.get('file_name') or batch.get('name') or 'CSV'}\n{len(batch_ids_for_row)} posts · {checked_count} cochés"
+                file_name = str(batch.get("file_name") or batch.get("name") or "CSV")
+                label = f"{compact_source_label(file_name)} · {checked_count}/{len(batch_ids_for_row)}"
                 if st.button(
                     label,
                     key=f"library_batch_{batch_id}",
                     type="primary" if active_batch_id == batch_id else "secondary",
                     use_container_width=True,
+                    help=f"{file_name}\n{len(batch_ids_for_row)} posts, {checked_count} sélectionnés",
                 ):
                     st.session_state["post_library_batch_id"] = batch_id
                     st.rerun()
 
     with list_col:
-        with st.container(border=True):
-            st.markdown(
-                "<div class='post-library-list-title'><div><span>POSTS</span>"
-                f"<strong>{len(visible_posts)} post(s)</strong></div>"
-                f"<b>{len(selected_ids)} pour la preview</b></div>",
-                unsafe_allow_html=True,
-            )
-            action_a, action_b, action_c = st.columns([1.05, 1.2, 1.65], gap="small")
-            visible_ids = {int(post["id"]) for post in visible_posts if bool(post.get("is_active", 1))}
-            with action_a:
-                select_label = "Cocher ce CSV" if active_batch_id not in {"all", "favorites"} else "Cocher la vue"
-                if st.button(select_label, key="library_select_batch", use_container_width=True):
-                    persist_selection(selected_ids | visible_ids)
-                    st.rerun()
-            with action_b:
-                clear_label = "Tout décocher" if active_batch_id == "all" else "Décocher la vue"
-                if st.button(clear_label, key="library_select_none", use_container_width=True):
-                    persist_selection(set() if active_batch_id == "all" else selected_ids - visible_ids)
-                    st.rerun()
-            with action_c:
-                if st.button("Continuer vers Preview", key="library_continue_preview", type="primary", use_container_width=True):
-                    if not selected_ids:
-                        st.warning("Coche au moins un post avant de passer à la preview.")
-                    else:
-                        st.session_state["active_step"] = 3
-                        st.session_state["app_page"] = "preview"
-                        st.rerun()
+        st.markdown("<div class='post-library-main'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='post-library-list-title'><div><span>SOURCE ACTIVE</span>"
+            f"<strong title='{escape(active_source_name)}'>{escape(compact_source_label(active_source_name, 56))}</strong>"
+            f"<small>{len(visible_posts)} posts</small></div>"
+            f"<b>{len(selected_ids)} pour la preview</b></div>",
+            unsafe_allow_html=True,
+        )
 
-            page_label = (
-                "Aucun post" if not visible_posts
-                else f"{page_start + 1}-{min(page_start + page_size, len(visible_posts))} sur {len(visible_posts)}"
-            )
-            page_prev, page_info, page_next = st.columns([1, 2.4, 1], gap="small")
-            with page_prev:
-                if st.button("Précédent", key=f"library_page_previous_{active_batch_id}", disabled=current_page <= 1, use_container_width=True):
-                    st.session_state[page_key] = current_page - 1
-                    st.rerun()
-            with page_info:
-                st.markdown(
-                    f"<div class='post-library-page-info'>{page_label}</div>",
-                    unsafe_allow_html=True,
-                )
-            with page_next:
-                if st.button("Suivant", key=f"library_page_next_{active_batch_id}", disabled=current_page >= page_count, use_container_width=True):
-                    st.session_state[page_key] = current_page + 1
-                    st.rerun()
-
-            st.markdown("<div class='post-list-head post-list-head-new'><span></span><span>POST</span><span>MÉDIA</span><span>UTILISÉ</span></div>", unsafe_allow_html=True)
-            with st.container(height=620, border=False):
-                if not visible_posts:
-                    st.markdown("<div class='post-library-empty'>Aucun post dans cette vue.</div>", unsafe_allow_html=True)
+        visible_ids = {int(post["id"]) for post in visible_posts if bool(post.get("is_active", 1))}
+        action_a, action_b, action_space, action_c = st.columns([1.15, 1.15, 1.35, 1.55], gap="small")
+        with action_a:
+            select_label = "Sélectionner ce CSV" if active_batch_id not in {"all", "favorites"} else "Sélectionner la vue"
+            if st.button(select_label, key="library_select_batch", use_container_width=True):
+                persist_selection(selected_ids | visible_ids)
+                st.rerun()
+        with action_b:
+            clear_label = "Tout désélectionner" if active_batch_id == "all" else "Désélectionner la vue"
+            if st.button(clear_label, key="library_select_none", use_container_width=True):
+                persist_selection(set() if active_batch_id == "all" else selected_ids - visible_ids)
+                st.rerun()
+        with action_c:
+            if st.button("Suivant : Photos", key="library_continue_photos", type="primary", use_container_width=True):
+                if not selected_ids:
+                    st.warning("Sélectionne au moins un post avant de continuer.")
                 else:
-                    for post in page_posts:
-                        post_id = int(post["id"])
-                        selection_key = f"library_selected_{post_id}_{st.session_state.get('posts_editor_version', 0)}"
-                        row_cols = st.columns([.44, 9.7, .9, .95], gap="small")
-                        with row_cols[0]:
-                            st.checkbox(
-                                "Sélectionner",
-                                value=bool(post.get("is_active", 1)) and post_id in selected_ids,
-                                key=selection_key,
-                                disabled=not bool(post.get("is_active", 1)),
-                                label_visibility="collapsed",
-                                on_change=set_post_selected,
-                                args=(post_id, selection_key),
+                    st.session_state["active_step"] = 3
+                    st.session_state["app_page"] = "photos"
+                    st.rerun()
+
+        page_label = (
+            "Aucun post" if not visible_posts
+            else f"{page_start + 1}-{min(page_start + page_size, len(visible_posts))} sur {len(visible_posts)}"
+        )
+        page_prev, page_info, page_next = st.columns([0.42, 4.16, 0.42], gap="small")
+        with page_prev:
+            if st.button(
+                "←",
+                key=f"library_page_previous_{active_batch_id}",
+                disabled=current_page <= 1,
+                use_container_width=True,
+                help="Page précédente",
+            ):
+                st.session_state[page_key] = current_page - 1
+                st.rerun()
+        with page_info:
+            st.markdown(f"<div class='post-library-page-info'>{page_label}</div>", unsafe_allow_html=True)
+        with page_next:
+            if st.button(
+                "→",
+                key=f"library_page_next_{active_batch_id}",
+                disabled=current_page >= page_count,
+                use_container_width=True,
+                help="Page suivante",
+            ):
+                st.session_state[page_key] = current_page + 1
+                st.rerun()
+
+        st.markdown("<div class='post-list-head post-list-head-new'><span></span><span>POST</span><span>MÉDIA</span><span>UTILISÉ</span></div>", unsafe_allow_html=True)
+        if not visible_posts:
+            st.markdown("<div class='post-library-empty'>Aucun post dans cette source.</div>", unsafe_allow_html=True)
+        else:
+            for post in page_posts:
+                post_id = int(post["id"])
+                selection_key = f"library_selected_{post_id}_{st.session_state.get('posts_editor_version', 0)}"
+                row_cols = st.columns([.42, 10.45, .66, .76], gap="small")
+                with row_cols[0]:
+                    st.checkbox(
+                        "Sélectionner",
+                        value=bool(post.get("is_active", 1)) and post_id in selected_ids,
+                        key=selection_key,
+                        disabled=not bool(post.get("is_active", 1)),
+                        label_visibility="collapsed",
+                        on_change=set_post_selected,
+                        args=(post_id, selection_key),
+                    )
+                with row_cols[1]:
+                    st.markdown("<div class='post-row-click-target'></div>", unsafe_allow_html=True)
+                    if st.button(
+                        str(post.get("caption") or "Post sans texte"),
+                        key=f"library_edit_post_{post_id}",
+                        use_container_width=True,
+                        help="Ouvrir et modifier ce post",
+                    ):
+                        st.session_state["post_library_edit_id"] = post_id
+                        st.rerun()
+                with row_cols[2]:
+                    st.markdown(
+                        f"<div class='post-library-row-meta'>{'Photo' if media_ids_text(post.get('media_ids')) else '—'}</div>",
+                        unsafe_allow_html=True,
+                    )
+                with row_cols[3]:
+                    used_count = int(post.get("total_used") or 0)
+                    st.markdown(
+                        f"<div class='post-library-row-meta {'is-used' if used_count else ''}'>{used_count if used_count else '—'}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+    if st.session_state.get("post_library_import_open"):
+        @st.dialog("Importer des CSV")
+        def import_csv_dialog() -> None:
+            st.caption("Le dernier import est sélectionné automatiquement pour la prochaine preview.")
+            uploaded_files = st.file_uploader(
+                "Fichiers CSV",
+                type=["csv"],
+                accept_multiple_files=True,
+                key="library_csv_upload_dialog",
+            )
+            if st.button(
+                "Importer",
+                disabled=not uploaded_files,
+                type="primary",
+                key="library_import_csv_dialog",
+                use_container_width=True,
+            ):
+                existing_hashes = {str(batch.get("file_hash") or "") for batch in db.list_post_import_batches()}
+                latest_batch_id = ""
+                imported_post_ids: set[int] = set()
+                summaries: list[str] = []
+                errors: list[str] = []
+                with st.spinner("Import des CSV en cours..."):
+                    for uploaded in uploaded_files or []:
+                        raw = uploaded.getvalue()
+                        file_hash = hashlib.sha256(raw).hexdigest()
+                        if file_hash in existing_hashes:
+                            summaries.append(f"{uploaded.name}: déjà présent")
+                            continue
+                        try:
+                            records = parse_post_csv(raw, uploaded.name)
+                            added, skipped, post_ids = db.add_posts_with_ids(records)
+                            latest_batch_id = db.record_post_import_batch(
+                                uploaded.name, file_hash, len(raw), added, skipped, post_ids,
                             )
-                        with row_cols[1]:
-                            st.markdown("<div class='post-row-click-target'></div>", unsafe_allow_html=True)
-                            if st.button(
-                                str(post.get("caption") or "Post sans texte"),
-                                key=f"library_edit_post_{post_id}",
-                                use_container_width=True,
-                                help="Ouvrir et modifier ce post",
-                            ):
-                                st.session_state["post_library_edit_id"] = post_id
-                                st.rerun()
-                        with row_cols[2]:
-                            st.markdown(
-                                f"<div class='post-library-row-meta'>{'Photo' if media_ids_text(post.get('media_ids')) else '—'}</div>",
-                                unsafe_allow_html=True,
-                            )
-                        with row_cols[3]:
-                            used_count = int(post.get("total_used") or 0)
-                            st.markdown(
-                                f"<div class='post-library-row-meta {'is-used' if used_count else ''}'>{f'{used_count} fois' if used_count else '—'}</div>",
-                                unsafe_allow_html=True,
-                            )
+                            imported_post_ids.update(int(post_id) for post_id in post_ids)
+                            summaries.append(f"{uploaded.name}: {added} ajoutés, {skipped} ignorés")
+                        except (OSError, ValueError, pd.errors.ParserError) as exc:
+                            errors.append(f"{uploaded.name}: {exc}")
+                if latest_batch_id:
+                    st.session_state["post_library_batch_id"] = latest_batch_id
+                    st.session_state["post_import_batch_filter"] = latest_batch_id
+                    persist_selection(selected_ids | imported_post_ids)
+                    st.session_state["post_library_import_notice"] = " | ".join(summaries)
+                    if errors:
+                        st.session_state["post_library_import_notice"] += f". {len(errors)} fichier(s) non importé(s)."
+                    st.session_state.pop("post_library_import_open", None)
+                    st.rerun()
+                if errors:
+                    st.error(" | ".join(errors))
+                if summaries and not latest_batch_id:
+                    st.info(" | ".join(summaries))
+            if st.button("Annuler", key="library_cancel_import", use_container_width=True):
+                st.session_state.pop("post_library_import_open", None)
+                st.rerun()
+
+        import_csv_dialog()
 
     if st.session_state.get("post_library_new_post"):
         @st.dialog("Nouveau post")
@@ -1447,6 +1576,392 @@ def render_post_library_workspace() -> None:
 
     if st.session_state.get("post_library_edit_id"):
         render_post_editor_dialog(int(st.session_state["post_library_edit_id"]))
+
+
+def render_photo_workspace(client: PostoriaClient | None) -> None:
+    """Manage independent photo groups, exclusive accounts, quotas and Postoria readiness."""
+    groups = [group for group in db.list_photo_groups() if group["name"] != db.DEFAULT_PHOTO_GROUP]
+    accounts = db.list_accounts()
+    workspace_id = st.session_state.get("workspace_id")
+    active_group_id = int(st.session_state.get("active_photo_group_id") or 0)
+    if active_group_id not in {int(group["id"]) for group in groups}:
+        active_group_id = int(groups[0]["id"]) if groups else 0
+        st.session_state["active_photo_group_id"] = active_group_id
+
+    st.markdown(
+        "<div class='photo-page-heading'><div><span>PHOTOS</span><h1>Groupes photo</h1>"
+        "<p>Prépare les images, les comptes autorisés et le rythme avant de générer la preview.</p></div>"
+        f"<b>{sum(int(group.get('postoria_ready_count') or 0) for group in groups)} prêtes</b></div>",
+        unsafe_allow_html=True,
+    )
+
+    if st.button("+ Nouveau groupe photo", key="photo_create_group_open", type="primary"):
+        st.session_state["photo_create_group_dialog"] = True
+
+    if st.session_state.get("photo_create_group_dialog"):
+        @st.dialog("Nouveau groupe photo")
+        def create_photo_group_dialog() -> None:
+            with st.form("create_photo_group_form"):
+                name = st.text_input("Nom du groupe", placeholder="Ex. selfies quotidiens")
+                quota_mode_label = st.radio(
+                    "Répartition",
+                    ["Même quota pour tout le groupe", "Quota différent par compte"],
+                    horizontal=True,
+                )
+                global_quota = st.number_input(
+                    "Photos par compte et par jour",
+                    min_value=0,
+                    value=4,
+                    step=1,
+                    disabled=quota_mode_label != "Même quota pour tout le groupe",
+                )
+                spacing = st.slider("Espacement minimum entre deux photos", 0, 100, 20, 5, format="%d %%")
+                submitted = st.form_submit_button("Créer le groupe", type="primary", use_container_width=True)
+            if submitted:
+                if not str(name).strip():
+                    st.warning("Ajoute un nom au groupe.")
+                else:
+                    group_id = db.upsert_photo_group(
+                        str(name),
+                        quota_mode="global" if quota_mode_label.startswith("Même") else "per_account",
+                        global_quota=int(global_quota),
+                        spacing_percent=int(spacing),
+                    )
+                    st.session_state["active_photo_group_id"] = group_id
+                    st.session_state.pop("photo_create_group_dialog", None)
+                    mark_group_config_dirty()
+                    persist_group_config_if_needed(force=True)
+                    st.rerun()
+            if st.button("Annuler", key="photo_create_group_cancel", use_container_width=True):
+                st.session_state.pop("photo_create_group_dialog", None)
+                st.rerun()
+        create_photo_group_dialog()
+
+    if not groups:
+        st.info("Crée un groupe photo pour commencer. Les photos restent optionnelles: tu peux aussi continuer sans image.")
+        if st.button("Continuer sans photo vers Preview", key="photos_continue_empty", use_container_width=True):
+            st.session_state["app_page"] = "preview"
+            st.session_state["active_step"] = 4
+            st.rerun()
+        return
+
+    finder_col, content_col = st.columns([1, 3.35], gap="large")
+    with finder_col:
+        with st.container(border=True):
+            st.markdown("<div class='photo-panel-label'>GROUPES PHOTO</div>", unsafe_allow_html=True)
+            for group in groups:
+                group_id = int(group["id"])
+                label = (
+                    f"{group['name']}\n"
+                    f"{int(group.get('account_count') or 0)} comptes · "
+                    f"{int(group.get('postoria_ready_count') or 0)}/{int(group.get('photo_count') or 0)} prêtes"
+                )
+                if st.button(
+                    label,
+                    key=f"photo_group_nav_{group_id}",
+                    type="primary" if group_id == active_group_id else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state["active_photo_group_id"] = group_id
+                    st.rerun()
+            st.divider()
+            st.caption("Un compte ne peut appartenir qu'à un seul groupe photo.")
+
+    active_group = next(group for group in groups if int(group["id"]) == active_group_id)
+    group_accounts = db.list_photo_group_accounts(active_group_id)
+    group_account_by_id = {int(item["account_id"]): item for item in group_accounts}
+    memberships = db.photo_account_memberships()
+    group_assets = [asset for asset in db.list_photo_assets() if int(asset["group_id"]) == active_group_id]
+
+    with content_col:
+        st.markdown(
+            "<div class='photo-group-title'>"
+            f"<div><span>GROUPE ACTIF</span><h2>{h(active_group['name'])}</h2></div>"
+            "<div>"
+            f"<b>{len(group_accounts)}</b><small>comptes</small>"
+            f"<b>{len(group_assets)}</b><small>photos</small>"
+            f"<b>{int(active_group.get('postoria_ready_count') or 0)}</b><small>prêtes</small>"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        with st.container(border=True):
+            st.markdown("<div class='photo-panel-label'>RÈGLES DU GROUPE</div>", unsafe_allow_html=True)
+            with st.form(f"photo_group_settings_{active_group_id}"):
+                settings_a, settings_b, settings_c = st.columns([1.45, 1.2, 1], gap="medium")
+                with settings_a:
+                    revised_name = st.text_input("Nom", value=str(active_group["name"]))
+                with settings_b:
+                    mode_label = st.radio(
+                        "Quota",
+                        ["Global", "Par compte"],
+                        index=1 if str(active_group.get("quota_mode")) == "per_account" else 0,
+                        horizontal=True,
+                    )
+                with settings_c:
+                    group_quota = st.number_input(
+                        "Photos / compte / jour",
+                        min_value=0,
+                        value=int(active_group.get("global_quota") or 0),
+                        step=1,
+                        disabled=mode_label == "Par compte",
+                    )
+                spacing_percent = st.slider(
+                    "Espacement minimum entre deux posts avec photo",
+                    min_value=0,
+                    max_value=100,
+                    value=int(active_group.get("spacing_percent") or 0),
+                    step=5,
+                    format="%d %% des posts du compte",
+                )
+                save_settings = st.form_submit_button("Enregistrer les règles", type="primary")
+            if save_settings:
+                try:
+                    db.set_photo_group_settings(
+                        active_group_id,
+                        revised_name,
+                        "per_account" if mode_label == "Par compte" else "global",
+                        int(group_quota),
+                        int(spacing_percent),
+                    )
+                except ValueError as exc:
+                    st.warning(str(exc))
+                else:
+                    mark_group_config_dirty()
+                    persist_group_config_if_needed(force=True)
+                    st.success("Règles enregistrées.")
+                    st.rerun()
+
+        with st.container(border=True):
+            st.markdown("<div class='photo-panel-label'>COMPTES AUTORISÉS</div>", unsafe_allow_html=True)
+            st.caption(
+                "Le quota global s'applique à tous. En mode Par compte, règle chaque ligne; 0 exclut temporairement les photos de ce compte."
+            )
+            account_rows = []
+            for account in accounts:
+                account_id = int(account["id"])
+                membership = group_account_by_id.get(account_id)
+                current_membership = memberships.get(account_id)
+                account_rows.append(
+                    {
+                        "Dans ce groupe": bool(membership),
+                        "Compte": str(account.get("username") or account.get("name") or account_id).lstrip("@"),
+                        "Quota / jour": int(
+                            membership.get("quota_override")
+                            if membership
+                            else active_group.get("global_quota") or 0
+                        ),
+                        "Groupe actuel": (
+                            str(current_membership.get("group_name"))
+                            if current_membership and int(current_membership["group_id"]) != active_group_id
+                            else "—"
+                        ),
+                        "account_id": account_id,
+                    }
+                )
+            with st.form(f"photo_group_accounts_form_{active_group_id}"):
+                edited_accounts = st.data_editor(
+                    pd.DataFrame(account_rows),
+                    hide_index=True,
+                    use_container_width=True,
+                    height=min(520, 78 + len(account_rows) * 36),
+                    column_order=["Dans ce groupe", "Compte", "Quota / jour", "Groupe actuel", "account_id"],
+                    column_config={
+                        "Dans ce groupe": st.column_config.CheckboxColumn("Utiliser les photos"),
+                        "Compte": st.column_config.TextColumn("Compte", disabled=True, width="large"),
+                        "Quota / jour": st.column_config.NumberColumn(
+                            "Quota / jour",
+                            min_value=0,
+                            step=1,
+                            width="small",
+                        ),
+                        "Groupe actuel": st.column_config.TextColumn("Autre groupe photo", disabled=True),
+                        "account_id": st.column_config.NumberColumn("ID", disabled=True),
+                    },
+                    disabled=["Compte", "Groupe actuel", "account_id"] + (
+                        ["Quota / jour"] if str(active_group.get("quota_mode")) != "per_account" else []
+                    ),
+                    key=f"photo_group_accounts_editor_{active_group_id}",
+                )
+                save_accounts = st.form_submit_button("Enregistrer les comptes", type="primary")
+            if save_accounts:
+                quotas = {
+                    int(row["account_id"]): int(row["Quota / jour"])
+                    for _, row in edited_accounts.iterrows()
+                    if bool(row["Dans ce groupe"])
+                }
+                conflicts = [
+                    memberships[account_id]
+                    for account_id in quotas
+                    if account_id in memberships and int(memberships[account_id]["group_id"]) != active_group_id
+                ]
+                if conflicts:
+                    st.session_state["photo_group_pending_move"] = {
+                        "group_id": active_group_id,
+                        "group_name": str(active_group["name"]),
+                        "quotas": quotas,
+                        "conflicts": conflicts,
+                    }
+                else:
+                    db.set_photo_group_accounts(active_group_id, quotas)
+                    mark_group_config_dirty()
+                    persist_group_config_if_needed(force=True)
+                    st.success(f"{len(quotas)} compte(s) enregistrés.")
+                    st.rerun()
+
+        with st.container(border=True):
+            media_head_a, media_head_b = st.columns([2.2, 1], gap="medium")
+            with media_head_a:
+                st.markdown("<div class='photo-panel-label'>PHOTOS DU GROUPE</div>", unsafe_allow_html=True)
+                uploads = st.file_uploader(
+                    "Ajouter des photos",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    accept_multiple_files=True,
+                    key=f"photo_group_uploads_{active_group_id}",
+                    label_visibility="collapsed",
+                )
+            with media_head_b:
+                if st.button(
+                    "Ajouter au groupe",
+                    key=f"photo_group_upload_button_{active_group_id}",
+                    disabled=not uploads,
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    created_ids = []
+                    for upload in uploads or []:
+                        created_ids.append(
+                            db.add_photo_asset(
+                                str(active_group["name"]),
+                                upload.name,
+                                "",
+                                upload.type or "image/jpeg",
+                                upload.getvalue(),
+                            )
+                        )
+                    upload_errors = []
+                    if client and workspace_id:
+                        progress = st.progress(0, text="Upload des photos vers Postoria...")
+                        for index, asset_id in enumerate(created_ids, start=1):
+                            asset = db.get_photo_asset(asset_id)
+                            try:
+                                if asset:
+                                    upload_photo_asset_to_postoria(client, workspace_id, asset)
+                            except Exception as exc:
+                                upload_errors.append(short_debug(exc))
+                            progress.progress(index / len(created_ids), text=f"Photo {index}/{len(created_ids)}")
+                        progress.empty()
+                    else:
+                        upload_errors.append("Workspace ou API Postoria absent: photos conservées en attente.")
+                    _, storage_errors = persist_photo_library()
+                    upload_errors.extend(storage_errors)
+                    if upload_errors:
+                        st.warning(f"{len(created_ids)} photo(s) ajoutée(s), avec {len(upload_errors)} avertissement(s).")
+                    else:
+                        st.success(f"{len(created_ids)} photo(s) ajoutée(s). Traitement Postoria lancé.")
+                    st.rerun()
+
+            sync_a, sync_b = st.columns([1, 2.4], gap="medium")
+            with sync_a:
+                if st.button(
+                    "Actualiser / retenter",
+                    key=f"photo_refresh_status_{active_group_id}",
+                    disabled=not client or not workspace_id,
+                    use_container_width=True,
+                ):
+                    checked, errors = refresh_photo_media_statuses(client, workspace_id)
+                    st.success(f"{checked} statut(s) vérifié(s), {errors} erreur(s).")
+                    st.rerun()
+            with sync_b:
+                pending_count = sum(1 for asset in group_assets if str(asset.get("media_status")) != "ready")
+                st.caption(
+                    f"{pending_count} photo(s) encore en attente ou en erreur. "
+                    "Ce bouton vérifie les traitements et retente les uploads échoués."
+                )
+
+            group_assets = [asset for asset in db.list_photo_assets() if int(asset["group_id"]) == active_group_id]
+            if not group_assets:
+                st.info("Aucune photo dans ce groupe.")
+            else:
+                gallery_cols = st.columns(4, gap="medium")
+                for index, asset in enumerate(group_assets):
+                    with gallery_cols[index % 4]:
+                        st.markdown("<div class='photo-asset-card'>", unsafe_allow_html=True)
+                        if asset.get("image_bytes"):
+                            st.image(asset["image_bytes"], use_column_width=True)
+                        else:
+                            st.markdown("<div class='photo-missing'>Image distante</div>", unsafe_allow_html=True)
+                        status = str(asset.get("media_status") or "pending_upload")
+                        label = {"ready": "Prête", "processing": "Traitement", "uploading": "Upload", "failed": "Erreur"}.get(status, "En attente")
+                        st.markdown(
+                            f"<div class='photo-asset-meta'><strong>{h(asset.get('name'))}</strong>"
+                            f"<span class='photo-status is-{h(status)}'>{h(label)}</span>"
+                            f"<small>{int(asset.get('usage_count') or 0)} utilisation(s)</small></div>",
+                            unsafe_allow_html=True,
+                        )
+                        if asset.get("media_error"):
+                            st.caption(str(asset["media_error"])[:120])
+                        if st.button("Archiver", key=f"photo_asset_archive_{asset['id']}", use_container_width=True):
+                            db.archive_photo_asset(int(asset["id"]))
+                            mark_group_config_dirty()
+                            persist_group_config_if_needed(force=True)
+                            st.rerun()
+                        st.markdown("</div>", unsafe_allow_html=True)
+
+        footer_a, footer_b, footer_c = st.columns([1, 1.5, 1], gap="medium")
+        with footer_a:
+            if st.button("Archiver ce groupe", key=f"archive_photo_group_{active_group_id}", use_container_width=True):
+                st.session_state["photo_group_archive_pending"] = active_group_id
+        with footer_c:
+            if st.button("Continuer vers Preview", key="photos_continue_preview", type="primary", use_container_width=True):
+                st.session_state["app_page"] = "preview"
+                st.session_state["active_step"] = 4
+                st.rerun()
+
+    if st.session_state.get("photo_group_pending_move"):
+        pending = st.session_state["photo_group_pending_move"]
+
+        @st.dialog("Déplacer les comptes ?")
+        def confirm_photo_account_moves() -> None:
+            names = ", ".join(
+                str(item.get("account_name") or item.get("account_id"))
+                for item in pending["conflicts"]
+            )
+            st.warning(
+                f"{names} appartiennent déjà à un autre groupe photo. "
+                f"Ils seront déplacés vers {pending['group_name']}."
+            )
+            confirm_a, confirm_b = st.columns(2)
+            with confirm_a:
+                if st.button("Confirmer le déplacement", type="primary", use_container_width=True):
+                    db.set_photo_group_accounts(int(pending["group_id"]), pending["quotas"])
+                    st.session_state.pop("photo_group_pending_move", None)
+                    mark_group_config_dirty()
+                    persist_group_config_if_needed(force=True)
+                    st.rerun()
+            with confirm_b:
+                if st.button("Annuler", key="photo_account_move_cancel", use_container_width=True):
+                    st.session_state.pop("photo_group_pending_move", None)
+                    st.rerun()
+        confirm_photo_account_moves()
+
+    if st.session_state.get("photo_group_archive_pending"):
+        archive_id = int(st.session_state["photo_group_archive_pending"])
+
+        @st.dialog("Archiver le groupe photo ?")
+        def confirm_photo_group_archive() -> None:
+            st.caption("L'historique et les photos restent conservés. Le groupe ne sera plus utilisé dans les nouvelles previews.")
+            if st.button("Archiver", type="primary", use_container_width=True):
+                db.archive_photo_group(archive_id)
+                st.session_state.pop("photo_group_archive_pending", None)
+                st.session_state.pop("active_photo_group_id", None)
+                mark_group_config_dirty()
+                persist_group_config_if_needed(force=True)
+                st.rerun()
+            if st.button("Annuler", key="photo_group_archive_cancel", use_container_width=True):
+                st.session_state.pop("photo_group_archive_pending", None)
+                st.rerun()
+        confirm_photo_group_archive()
 
 
 def widget_slug(value: str) -> str:
@@ -1573,17 +2088,18 @@ def render_flow_status(
     tracking_ready: bool,
 ) -> int:
     active_step = int(st.session_state.get("active_step", 0))
-    active_step = min(6, max(0, active_step))
+    active_step = min(7, max(0, active_step))
     steps = [
         ("1", "Comptes", accounts_ready),
         ("2", "Cadence", cadence_ready),
-        ("3", "Posts/photos", posts_ready),
-        ("4", "Preview", preview_ready),
-        ("5", "Analytics", analytics_ready),
-        ("6", "Envoi", send_ready),
-        ("7", "Suivi", tracking_ready),
+        ("3", "Posts", posts_ready),
+        ("4", "Photos", True),
+        ("5", "Preview", preview_ready),
+        ("6", "Analytics", analytics_ready),
+        ("7", "Envoi", send_ready),
+        ("8", "Suivi", tracking_ready),
     ]
-    cols = st.columns([1.05, .8, 1.05, .8, .9, .75, .75])
+    cols = st.columns([1, .85, .85, .85, .9, .9, .8, .8])
     for idx, (number, label, ready) in enumerate(steps):
         status = "OK" if ready else "À faire"
         active_mark = "● " if idx == active_step else ""
@@ -1604,6 +2120,7 @@ def render_step_links(active_step: int) -> None:
         ("accounts", "Comptes"),
         ("cadence", "Cadence"),
         ("posts", "Posts"),
+        ("photos", "Photos"),
         ("preview", "Preview"),
         ("analytics", "Analytics"),
         ("send", "Envoi"),
@@ -1749,7 +2266,7 @@ def render_dashboard_overview(accounts: list[dict], posts: list[dict], preview_r
 
 def render_sidebar_navigation(active_page: str, api_exists: bool, dry_run_default: bool) -> tuple[str, bool]:
     page_groups = [
-        ("PLANIFICATION", [("dashboard", "Dashboard"), ("accounts", "Comptes"), ("cadence", "Cadence"), ("posts", "Posts"), ("preview", "Preview")]),
+        ("PLANIFICATION", [("dashboard", "Dashboard"), ("accounts", "Comptes"), ("cadence", "Cadence"), ("posts", "Posts"), ("photos", "Photos"), ("preview", "Preview")]),
         ("ANALYSE", [("analytics", "Analytics")]),
         ("ENVOI", [("send", "Envoi Postoria"), ("tracking", "Suivi")]),
     ]
@@ -1895,6 +2412,62 @@ def render_analytics(rows: list[dict]) -> None:
         with tab:
             matrix = pivot_counts(filtered, index, columns)
             st.dataframe(matrix, use_container_width=True, height=520)
+
+
+def render_photo_analytics() -> None:
+    photo_rows = db.photo_analytics_rows()
+    st.markdown("### Analytics photo")
+    if not photo_rows:
+        st.info("Aucune photo n'a encore été attribuée à une preview.")
+        return
+    frame = pd.DataFrame(photo_rows)
+    timestamps = pd.to_datetime(frame["scheduled_time_local"], errors="coerce")
+    frame["jour"] = timestamps.dt.strftime("%Y-%m-%d").fillna("")
+    frame["semaine"] = timestamps.dt.strftime("%G-S%V").fillna("")
+    frame["mois"] = timestamps.dt.strftime("%Y-%m").fillna("")
+    frame["état_photo"] = "Réservée"
+    frame.loc[frame["photo_assignment_state"].astype(str).eq("used"), "état_photo"] = "Envoyée"
+    failed_mask = frame["post_status"].astype(str).str.contains("fail|error", case=False, regex=True)
+    frame.loc[failed_mask, "état_photo"] = "Erreur"
+
+    render_metric_strip(
+        [
+            ("Attribuées", str(len(frame)), "historique total"),
+            ("Envoyées", str(int((frame["état_photo"] == "Envoyée").sum())), "acceptées Postoria"),
+            ("Réservées", str(int((frame["état_photo"] == "Réservée").sum())), "preview en attente"),
+            ("Erreurs", str(int((frame["état_photo"] == "Erreur").sum())), "à retenter"),
+        ]
+    )
+    dimensions = [
+        ("Par groupe photo", "photo_group_name"),
+        ("Par compte", "account_name"),
+        ("Par jour", "jour"),
+        ("Par semaine", "semaine"),
+        ("Par mois", "mois"),
+    ]
+    tabs = st.tabs([label for label, _ in dimensions])
+    for tab, (_, dimension) in zip(tabs, dimensions):
+        with tab:
+            summary = (
+                frame.groupby([dimension, "état_photo"], dropna=False)
+                .size()
+                .unstack(fill_value=0)
+                .reset_index()
+            )
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+
+    with st.expander("Fréquence par photo", expanded=False):
+        frequency = (
+            frame.groupby(["photo_group_name", "photo_name"], dropna=False)
+            .agg(
+                attribuées=("id", "count"),
+                envoyées=("photo_assignment_state", lambda values: int((values.astype(str) == "used").sum())),
+                dernière_programmation=("scheduled_time_local", "max"),
+            )
+            .reset_index()
+            .sort_values(["attribuées", "photo_group_name"], ascending=[False, True])
+        )
+        st.dataframe(frequency, use_container_width=True, hide_index=True)
 
 
 def render_blocker_chips(blockers: list[str]) -> None:
@@ -4731,7 +5304,352 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-api_exists = bool(os.getenv("POSTORIA_API_KEY"))
+postoria_api_key = optional_secret("POSTORIA_API_KEY")
+postoria_base_url = optional_secret("POSTORIA_BASE_URL") or "https://api.postoria.io/v1"
+st.markdown(
+    """
+    <style>
+    .photo-page-heading {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        margin: 18px 0 24px;
+        padding-bottom: 18px;
+        border-bottom: 1px solid var(--line);
+    }
+    .photo-page-heading span,
+    .photo-panel-label,
+    .photo-group-title span {
+        display: block;
+        color: #8f8f98;
+        font-size: 12px;
+        font-weight: 750;
+        letter-spacing: 0;
+        text-transform: uppercase;
+    }
+    .photo-page-heading h1,
+    .photo-group-title h2 {
+        margin: 5px 0 4px;
+        color: #f4f4f5;
+        line-height: 1.15;
+    }
+    .photo-page-heading h1 {font-size: 34px;}
+    .photo-page-heading p {margin: 0; color: #9a9aa3; max-width: 720px;}
+    .photo-page-heading > b {
+        flex: 0 0 auto;
+        padding: 8px 12px;
+        color: #ff5a78;
+        background: #2b171d;
+        border: 1px solid #60303d;
+        border-radius: 6px;
+    }
+    .photo-group-title {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 20px;
+        margin-bottom: 14px;
+    }
+    .photo-group-title h2 {font-size: 25px;}
+    .photo-group-title > div:last-child {
+        display: grid;
+        grid-template-columns: repeat(3, auto auto);
+        align-items: baseline;
+        gap: 4px 9px;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #17171a;
+    }
+    .photo-group-title > div:last-child b {font-size: 18px; color: #f4f4f5;}
+    .photo-group-title > div:last-child small {color: #8f8f98;}
+    .photo-panel-label {margin-bottom: 12px;}
+    .photo-asset-card {
+        min-width: 0;
+        margin: 8px 0 14px;
+        padding: 8px;
+        border: 1px solid #313136;
+        border-radius: 8px;
+        background: #17171a;
+    }
+    .photo-asset-card img {
+        aspect-ratio: 1 / 1;
+        object-fit: cover;
+        border-radius: 5px;
+    }
+    .photo-asset-meta {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 5px 8px;
+        padding: 9px 2px 4px;
+    }
+    .photo-asset-meta strong {
+        overflow: hidden;
+        color: #ececef;
+        font-size: 13px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .photo-asset-meta small {grid-column: 1 / -1; color: #888891;}
+    .photo-status {
+        padding: 3px 6px;
+        border-radius: 4px;
+        color: #c2c2ca;
+        background: #27272c;
+        font-size: 11px;
+        font-weight: 700;
+    }
+    .photo-status.is-ready {color: #75d3a3; background: #173126;}
+    .photo-status.is-failed {color: #ff8298; background: #351820;}
+    .photo-status.is-processing,
+    .photo-status.is-uploading {color: #e1c87b; background: #302916;}
+    .photo-missing {
+        display: grid;
+        min-height: 150px;
+        place-items: center;
+        color: #777780;
+        background: #111114;
+        border-radius: 5px;
+    }
+    div[data-testid="stDataEditor"] {border-radius: 7px; overflow: hidden;}
+    @media (max-width: 900px) {
+        .photo-page-heading,
+        .photo-group-title {align-items: flex-start; flex-direction: column;}
+        .photo-group-title > div:last-child {grid-template-columns: repeat(3, auto auto); width: 100%;}
+    }
+
+    /* Posts: one calm reading surface, compact sources, no nested scrolling. */
+    .block-container:has(.post-library-workspace) {
+        max-width: 1740px !important;
+        padding: 1.6rem 2rem 5rem !important;
+    }
+    .post-library-header {
+        align-items: center;
+        margin: 8px 0 24px;
+        padding: 0 0 18px;
+    }
+    .post-library-header h3 {
+        margin: 4px 0 3px;
+        font-size: 1.85rem;
+        line-height: 1.15;
+    }
+    .post-library-header > b {
+        border-radius: 6px;
+        padding: 7px 10px;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) {
+        align-items: flex-start !important;
+        gap: 28px !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:first-child {
+        flex: 0 0 238px !important;
+        width: 238px !important;
+        min-width: 238px !important;
+        padding-right: 20px !important;
+        border-right: 1px solid #2d2d32;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:nth-child(2) {
+        flex: 1 1 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+    }
+    .post-library-source-rail {
+        display: grid;
+        gap: 3px;
+        padding: 3px 0 9px;
+    }
+    .post-library-source-rail span,
+    .post-library-list-title span {
+        color: #85858e;
+        font-size: .68rem;
+        font-weight: 780;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+    .post-library-source-rail strong {
+        color: #ededf0;
+        font-size: .98rem;
+        font-weight: 720;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:first-child [data-testid="stButton"] button {
+        min-height: 38px !important;
+        padding: 7px 10px !important;
+        border-radius: 6px !important;
+        justify-content: flex-start !important;
+        text-align: left !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:first-child [data-testid="stButton"] button p {
+        overflow: hidden !important;
+        width: 100% !important;
+        text-align: left !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+        font-size: .79rem !important;
+        font-weight: 650 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:first-child [data-testid="stExpander"] {
+        border: 0 !important;
+        border-top: 1px solid #2d2d32 !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:first-child [data-testid="stExpander"] summary {
+        min-height: 40px !important;
+        padding: 0 4px !important;
+        color: #a3a3ab !important;
+        font-size: .78rem !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:first-child [data-testid="stExpanderDetails"] {
+        padding: 4px 0 0 !important;
+    }
+    .post-library-list-title {
+        align-items: center;
+        min-height: 54px;
+        padding: 0 0 13px;
+        border-bottom: 1px solid #2d2d32;
+    }
+    .post-library-list-title > div {
+        min-width: 0;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: baseline;
+        gap: 5px 10px;
+    }
+    .post-library-list-title strong {
+        overflow: hidden;
+        max-width: 58ch;
+        font-size: 1rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .post-library-list-title small {
+        color: #85858e;
+        font-size: .78rem;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+    .post-library-list-title b {
+        padding: 5px 8px;
+        border: 1px solid rgba(244, 63, 94, .22);
+        border-radius: 5px;
+        background: rgba(244, 63, 94, .07);
+        font-size: .76rem;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:nth-child(2) [data-testid="stButton"] button {
+        min-height: 38px !important;
+        padding: 7px 11px !important;
+        border-radius: 6px !important;
+        font-size: .8rem !important;
+    }
+    .post-library-page-info {
+        min-height: 34px;
+        border-top: 1px solid #29292e;
+        border-bottom: 1px solid #29292e;
+        color: #92929a;
+        font-size: .78rem;
+    }
+    .post-list-head-new {
+        grid-template-columns: .42fr 10.45fr .66fr .76fr !important;
+        min-height: 38px;
+        margin-top: 10px;
+        padding: 0 0 8px;
+        border-bottom: 1px solid #313136;
+    }
+    .post-list-head-new span {
+        padding: 0 7px;
+        color: #777780;
+        font-size: .67rem;
+        letter-spacing: .07em;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) {
+        min-height: 78px !important;
+        padding: 0 !important;
+        border-bottom: 1px solid #29292e !important;
+        background: transparent !important;
+        transition: background-color 160ms cubic-bezier(.16, 1, .3, 1);
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) > div {
+        min-width: 0 !important;
+        padding: 0 7px !important;
+        border: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) > div:first-child {
+        padding: 0 3px 0 0 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) [data-testid="stCheckbox"] {
+        min-height: 78px !important;
+        margin: 0 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button {
+        min-height: 78px !important;
+        padding: 12px 6px !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target) [data-testid="stButton"] button p {
+        -webkit-line-clamp: 3 !important;
+        font-size: .94rem !important;
+        font-weight: 570 !important;
+        line-height: 1.48 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.post-row-click-target):hover {
+        background: #17171b !important;
+    }
+    .post-library-row-meta {
+        min-height: 78px !important;
+        color: #85858e;
+        font-size: .76rem;
+    }
+    .post-library-row-meta.is-used {
+        color: #ff617d;
+    }
+    .post-library-empty {
+        min-height: 260px;
+        border-bottom: 1px solid #29292e;
+    }
+    @media (max-width: 1050px) {
+        .block-container:has(.post-library-workspace) {
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) {
+            gap: 18px !important;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:first-child {
+            flex-basis: 210px !important;
+            width: 210px !important;
+            min-width: 210px !important;
+            padding-right: 14px !important;
+        }
+    }
+    @media (max-width: 760px) {
+        div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) {
+            display: block !important;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:first-child,
+        div[data-testid="stHorizontalBlock"]:has(.post-library-source-rail) > div:nth-child(2) {
+            width: 100% !important;
+            min-width: 0 !important;
+            padding-right: 0 !important;
+            border-right: 0;
+        }
+        .post-library-list-title {margin-top: 18px;}
+        .post-list-head-new span:nth-child(3),
+        .post-list-head-new span:nth-child(4),
+        .post-library-row-meta {display: none;}
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+api_exists = bool(postoria_api_key)
 st.session_state.setdefault("app_page", "dashboard")
 st.session_state.setdefault("sidebar_dry_run", True)
 st.session_state.setdefault("sidebar_collapsed", False)
@@ -4746,7 +5664,7 @@ if st.session_state["sidebar_collapsed"]:
 client = None
 if api_exists:
     try:
-        client = PostoriaClient()
+        client = PostoriaClient(postoria_api_key, postoria_base_url)
     except Exception as e:
         st.error(str(e))
 
@@ -4784,10 +5702,11 @@ page_to_step = {
     "accounts": 0,
     "cadence": 1,
     "posts": 2,
-    "preview": 3,
-    "analytics": 4,
-    "send": 5,
-    "tracking": 6,
+    "photos": 3,
+    "preview": 4,
+    "analytics": 5,
+    "send": 6,
+    "tracking": 7,
 }
 active_step = page_to_step.get(active_page, int(st.session_state.get("active_step", 0)))
 st.session_state["active_step"] = active_step
@@ -4850,13 +5769,21 @@ if active_page != "dashboard" and active_step == 0:
                                     saved_config = GROUP_STORE.load(str(workspace_id))
                                     if saved_config:
                                         restored = db.apply_group_configuration(saved_config)
+                                        restored_photos, photo_restore_errors = restore_photo_bytes_from_supabase()
                                         restored_message = (
                                             f" {restored['groups']} groupe(s) et "
-                                            f"{restored['accounts']} préférence(s) restauré(s)."
+                                            f"{restored['accounts']} préférence(s) restauré(s), "
+                                            f"{restored.get('photo_groups', 0)} groupe(s) photo et "
+                                            f"{restored_photos} image(s) rechargée(s)."
                                         )
+                                        if photo_restore_errors:
+                                            st.session_state["remote_group_config_error"] = photo_restore_errors[0]
+                                        else:
+                                            st.session_state.pop("remote_group_config_error", None)
                                         st.session_state["remote_group_config_dirty"] = False
                                     st.session_state["remote_group_config_workspace"] = str(workspace_id)
-                                    st.session_state.pop("remote_group_config_error", None)
+                                    if not saved_config:
+                                        st.session_state.pop("remote_group_config_error", None)
                                 except GroupStoreError as exc:
                                     st.session_state["remote_group_config_error"] = str(exc)
                             fresh_accounts = db.list_accounts()
@@ -5417,16 +6344,8 @@ if active_page != "dashboard" and active_step == 2:
             f"{posts_min_required if posts_min_required == posts_max_required else f'{posts_min_required}-{posts_max_required}'} publications. "
             "Si tu sélectionnes moins de textes que nécessaire, ils tourneront en rotation."
         )
-        posts_view = st.radio(
-            "Section Posts",
-            ["Bibliothèque", "Médias"],
-            horizontal=True,
-            key="posts_workspace_view",
-            label_visibility="collapsed",
-        )
-        if posts_view == "Bibliothèque":
-            render_post_library_workspace()
-            st.stop()
+        render_post_library_workspace()
+        st.stop()
 
         st.markdown("#### Dossiers média")
         folders = db.list_media_folders()
@@ -5513,7 +6432,7 @@ if active_page != "dashboard" and active_step == 2:
             asset_cols = st.columns(4)
             for idx, asset in enumerate(gallery_assets[:24]):
                 with asset_cols[idx % 4]:
-                    st.image(asset["image_bytes"], use_container_width=True)
+                    st.image(asset["image_bytes"], use_column_width=True)
                     media_badge = asset.get("media_id") or "media ID manquant"
                     st.caption(f"{asset['group_name']} · {media_badge}")
                     if st.button("Choisir", key=f"choose_photo_asset_{asset['id']}", use_container_width=True):
@@ -5528,7 +6447,7 @@ if active_page != "dashboard" and active_step == 2:
             st.markdown("##### Photo sélectionnée")
             detail_col1, detail_col2 = st.columns([1, 1.4])
             with detail_col1:
-                st.image(selected_photo["image_bytes"], use_container_width=True)
+                st.image(selected_photo["image_bytes"], use_column_width=True)
                 st.caption(f"{selected_photo['name']} · groupe actuel: {selected_photo['group_name']}")
             with detail_col2:
                 existing_group_names = [group["name"] for group in db.list_photo_groups() if group["name"] != db.DEFAULT_PHOTO_GROUP]
@@ -5991,9 +6910,17 @@ if active_page != "dashboard" and active_step == 2:
                 st.warning("Aucun post sélectionné. Preview bloquée.")
 
 if active_page != "dashboard" and active_step == 3:
-    st.subheader("Preview du planning")
     section_intro(
         "Étape 4",
+        "Associe les groupes photo aux comptes et règle leur fréquence.",
+        "Les groupes photo sont indépendants des groupes de publication. Les images ne sont réservées qu'au moment de générer la preview.",
+    )
+    render_photo_workspace(client)
+
+if active_page != "dashboard" and active_step == 4:
+    st.subheader("Preview du planning")
+    section_intro(
+        "Étape 5",
         "Contrôle exactement ce qui va partir: compte, groupe, heure, média, statut, erreurs.",
         "Utilise les filtres avant de passer à l'envoi. Failed et erreurs restent visibles ici.",
     )
@@ -6038,12 +6965,31 @@ if active_page != "dashboard" and active_step == 3:
                 randomize_times=True,
                 media_library=db.media_folder_map(),
             )
+            rows, photo_reports, rotation_updates = assign_photos_to_schedule(
+                rows,
+                db.photo_planning_config(),
+                db.reserved_photo_asset_keys(),
+                seed=int(datetime.now().timestamp()),
+            )
+            for group_id, (rotation_order, rotation_used) in rotation_updates.items():
+                db.save_photo_rotation(group_id, rotation_order, rotation_used)
             batch_id = db.save_preview(rows, preview_batch_name)
+            st.session_state["photo_assignment_reports"] = photo_reports
             st.session_state["preview_rows"] = db.list_scheduled("preview")
             if int(current["posts_max"]) == 0:
                 st.warning("Preview vidée: 0 post créé. Les posts déjà planifiés/envoyés sont conservés.")
             else:
                 st.success(f"Planning généré : {len(rows)} posts dans le lot {batch_id}.")
+                assigned_photos = sum(1 for row in rows if row.get("photo_asset_id"))
+                if assigned_photos:
+                    st.info(f"{assigned_photos} photo(s) réservée(s) dans la rotation.")
+                if photo_reports:
+                    for report in photo_reports[:8]:
+                        account_label = f"compte {report['account_id']}" if report.get("account_id") else "groupe"
+                        st.warning(
+                            f"{report['group_name']} · {account_label} {report.get('day') or ''}: "
+                            f"{report['assigned']}/{report['requested']} photo(s). {report['reason']}."
+                        )
         except Exception as e:
             st.error(str(e))
 
@@ -6238,10 +7184,10 @@ if active_page != "dashboard" and active_step == 3:
             ],
         )
 
-if active_page != "dashboard" and active_step == 4:
+if active_page != "dashboard" and active_step == 5:
     st.subheader("Analytics de volume")
     section_intro(
-        "Étape 5",
+        "Étape 6",
         "Contrôle les volumes par compte, groupe et période.",
         "Par défaut, les brouillons preview sont exclus pour ne pas mélanger planification test et historique réel.",
     )
@@ -6257,11 +7203,12 @@ if active_page != "dashboard" and active_step == 4:
             if str(row.get("status")) not in ("preview", "preview_saved")
         ]
     render_analytics(analytics_rows)
+    render_photo_analytics()
 
-if active_page != "dashboard" and active_step == 5:
+if active_page != "dashboard" and active_step == 6:
     st.subheader("Envoi Postoria")
     section_intro(
-        "Étape 6",
+        "Étape 7",
         "Vérifie le résumé puis lance l'envoi.",
         "Le bouton devient disponible dès que la preview, l'API, le workspace et les horaires sont valides.",
     )
@@ -6365,6 +7312,7 @@ if active_page != "dashboard" and active_step == 5:
                     if postoria_id is None:
                         raise RuntimeError(f"Réponse Postoria sans post id: {short_debug(res)}")
                     db.update_scheduled_result(row["id"], postoria_id, postoria_status, None)
+                    db.mark_photo_assignment_used(int(row["id"]))
                     sent_count += 1
                 except Exception as e:
                     failed_count += 1
@@ -6380,7 +7328,7 @@ if active_page != "dashboard" and active_step == 5:
             progress.empty()
             remaining_preview = len(db.list_scheduled("preview"))
             if sent_count or failed_count:
-                st.session_state["active_step"] = 6
+                st.session_state["active_step"] = 7
             if failed_count:
                 st.error(f"Envoi terminé: {sent_count} envoyés, {failed_count} failed, {remaining_preview} encore en preview. Ouvre l'onglet Suivi pour contrôler.")
                 st.dataframe(pd.DataFrame(error_rows), use_container_width=True, hide_index=True)
@@ -6405,10 +7353,10 @@ if active_page != "dashboard" and active_step == 5:
             column_config={"threads_url": st.column_config.LinkColumn("Threads", display_text="Ouvrir")},
         )
 
-if active_page != "dashboard" and active_step == 6:
+if active_page != "dashboard" and active_step == 7:
     st.subheader("Suivi après envoi")
     section_intro(
-        "Étape 7",
+        "Étape 8",
         "Vérifie ce que Postoria a accepté, ce qui a échoué, et ce qui doit être contrôlé sur Threads.",
         "Cet onglet ne programme rien. Il lit les statuts enregistrés localement et peut rafraîchir les posts déjà créés sur Postoria.",
     )
