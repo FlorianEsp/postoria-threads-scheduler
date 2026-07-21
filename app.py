@@ -8,6 +8,7 @@ import random
 from datetime import date, datetime, time, timedelta
 from html import escape
 from math import floor
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -19,6 +20,7 @@ from postoria_client import PostoriaClient
 from photo_scheduler import assign_photos_to_schedule
 from scheduler import generate_schedule
 from supabase_groups import GroupStoreError, SupabaseGroupStore
+from utils import caption_hash
 
 st.set_page_config(page_title="Postoria Threads Scheduler", layout="wide")
 
@@ -34,10 +36,17 @@ APP_TZ = os.getenv("APP_TIMEZONE", "Europe/Brussels")
 
 def optional_secret(name: str) -> str:
     """Read a local env var or a Streamlit Cloud secret without exposing it in the UI."""
+    env_value = str(os.getenv(name, "") or "").strip()
+    secret_paths = (
+        Path.home() / ".streamlit" / "secrets.toml",
+        Path.cwd() / ".streamlit" / "secrets.toml",
+    )
+    if not any(path.is_file() for path in secret_paths):
+        return env_value
     try:
-        value = st.secrets.get(name, os.getenv(name, ""))
+        value = st.secrets.get(name, env_value)
     except Exception:
-        value = os.getenv(name, "")
+        value = env_value
     return str(value or "").strip()
 
 
@@ -1266,7 +1275,148 @@ def render_post_editor_dialog(post_id: int) -> None:
     edit_dialog()
 
 
-def render_post_library_workspace() -> None:
+def reusable_remote_post_rows(rows: list[dict], future_only: bool) -> list[dict]:
+    now_utc = datetime.now(ZoneInfo("UTC"))
+    reusable: list[dict] = []
+    seen_hashes: set[str] = set()
+    for row in rows:
+        status = str(row.get("status") or "").lower()
+        if any(marker in status for marker in ("fail", "error", "draft")):
+            continue
+        threads_payload = row.get("threads") if isinstance(row.get("threads"), dict) else {}
+        caption = str(threads_payload.get("caption") or row.get("caption") or "").strip()
+        if not caption:
+            continue
+        scheduled_raw = str(row.get("date") or row.get("scheduled_time_utc") or "")
+        if future_only:
+            try:
+                scheduled_at = datetime.fromisoformat(scheduled_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if scheduled_at.tzinfo is None:
+                scheduled_at = scheduled_at.replace(tzinfo=ZoneInfo("UTC"))
+            if scheduled_at <= now_utc:
+                continue
+        clean_hash = caption_hash(caption)
+        if clean_hash in seen_hashes:
+            continue
+        seen_hashes.add(clean_hash)
+        reusable.append({"caption": caption})
+    return reusable
+
+
+def merge_reusable_post_rows(*collections: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    seen_hashes: set[str] = set()
+    for rows in collections:
+        for row in rows:
+            caption = str(row.get("caption") or "").strip()
+            if not caption:
+                continue
+            clean_hash = caption_hash(caption)
+            if clean_hash in seen_hashes:
+                continue
+            seen_hashes.add(clean_hash)
+            merged.append({"caption": caption})
+    return merged
+
+
+def reuse_scheduled_posts_for_preview(reusable_rows: list[dict]) -> dict[str, int]:
+    payload = [{"caption": row["caption"]} for row in reusable_rows]
+    added, _, post_ids = db.add_posts_with_ids(payload)
+    unique_ids = sorted({int(post_id) for post_id in post_ids})
+    db.set_posts_active(unique_ids, True)
+
+    posts_by_id = {int(post["id"]): post for post in db.list_posts(active_only=False)}
+    selected_posts = [posts_by_id[post_id] for post_id in unique_ids if post_id in posts_by_id]
+    st.session_state["selected_posts"] = selected_posts
+    st.session_state["posts_selection_explicit"] = True
+    st.session_state["_selected_posts_signature"] = tuple(unique_ids)
+    st.session_state["posts_editor_version"] = st.session_state.get("posts_editor_version", 0) + 1
+    clear_preview_draft(
+        "Preview brouillon supprimée: textes planifiés repris une seule fois. Les posts Postoria existants restent conservés."
+    )
+    return {
+        "selected": len(selected_posts),
+        "added": int(added),
+        "reused": max(0, len(selected_posts) - int(added)),
+    }
+
+
+def render_reuse_scheduled_posts_dialog(client: PostoriaClient | None) -> None:
+    if not st.session_state.get("reuse_scheduled_posts_dialog"):
+        return
+
+    dialog = getattr(st, "dialog", st.experimental_dialog)
+
+    @dialog("Reprendre les posts planifiés")
+    def reuse_dialog() -> None:
+        scope = st.radio(
+            "Source",
+            ["Planifiés à venir", "Tout l'historique accepté"],
+            horizontal=True,
+            help="Seuls les posts possédant déjà un identifiant Postoria sont proposés.",
+        )
+        future_only = scope == "Planifiés à venir"
+        local_rows = db.list_reusable_scheduled_posts(future_only=future_only)
+        remote_rows = st.session_state.get("reuse_scheduled_remote_rows")
+        remote_error = str(st.session_state.get("reuse_scheduled_remote_error") or "")
+        if remote_rows is None and client:
+            workspace_id = st.session_state.get("workspace_id")
+            try:
+                if not workspace_id:
+                    workspaces = client.list_workspaces()
+                    if len(workspaces) == 1:
+                        workspace_id = workspaces[0]["id"]
+                        st.session_state["workspace_id"] = workspace_id
+                if workspace_id:
+                    with st.spinner("Lecture des posts Postoria..."):
+                        remote_rows = client.list_posts(int(workspace_id), max_items=500)
+                    st.session_state["reuse_scheduled_remote_rows"] = remote_rows
+                    st.session_state.pop("reuse_scheduled_remote_error", None)
+                else:
+                    remote_rows = []
+                    remote_error = "Choisis d'abord un workspace Postoria."
+            except Exception as exc:
+                remote_rows = []
+                remote_error = short_debug(exc)
+                st.session_state["reuse_scheduled_remote_error"] = remote_error
+        remote_rows = remote_rows if isinstance(remote_rows, list) else []
+        reusable_rows = merge_reusable_post_rows(
+            local_rows,
+            reusable_remote_post_rows(remote_rows, future_only=future_only),
+        )
+        st.markdown(f"**{len(reusable_rows)} texte(s) unique(s) disponible(s)**")
+        st.caption(
+            "Chaque texte est repris une seule fois, même s'il avait été planifié sur plusieurs comptes. "
+            "La sélection actuelle sera remplacée. Les médias, les comptes et les anciennes heures ne sont pas copiés. "
+            "La lecture Postoria est limitée aux 500 publications les plus récentes."
+        )
+        if remote_error:
+            st.warning(f"Postoria indisponible pour cette lecture : {remote_error}")
+        if st.button(
+            "Utiliser pour la prochaine preview",
+            key="reuse_scheduled_posts_confirm",
+            type="primary",
+            use_container_width=True,
+            disabled=not reusable_rows,
+        ):
+            result = reuse_scheduled_posts_for_preview(reusable_rows)
+            st.session_state["post_library_batch_id"] = "all"
+            st.session_state["scheduled_reuse_notice"] = (
+                f"{result['selected']} textes repris: {result['added']} ajoutés à la bibliothèque, "
+                f"{result['reused']} déjà présents."
+            )
+            st.session_state.pop("reuse_scheduled_posts_dialog", None)
+            st.rerun()
+        if st.button("Annuler", key="reuse_scheduled_posts_cancel", use_container_width=True):
+            st.session_state.pop("reuse_scheduled_posts_dialog", None)
+            st.rerun()
+
+    reuse_dialog()
+
+
+def render_post_library_workspace(client: PostoriaClient | None) -> None:
     """Finder-like batches, a readable post list, and one persistent preview."""
     batches = db.list_post_import_batches()
     all_posts = db.list_posts(active_only=False)
@@ -1318,6 +1468,7 @@ def render_post_library_workspace() -> None:
         visible_posts = [post for post in all_posts if int(post["id"]) in current_batch_ids]
 
     import_notice = str(st.session_state.pop("post_library_import_notice", "") or "").strip()
+    reuse_notice = str(st.session_state.pop("scheduled_reuse_notice", "") or "").strip()
     page_size = 12
     page_key = f"post_library_page_{active_batch_id}"
     page_count = max(1, (len(visible_posts) + page_size - 1) // page_size)
@@ -1335,6 +1486,8 @@ def render_post_library_workspace() -> None:
     )
     if import_notice:
         st.success(import_notice)
+    if reuse_notice:
+        st.success(reuse_notice)
 
     def compact_source_label(value: object, max_length: int = 30) -> str:
         label = str(value or "CSV").strip() or "CSV"
@@ -1364,6 +1517,16 @@ def render_post_library_workspace() -> None:
         if st.button("Nouveau post", key="library_open_new_post", use_container_width=True):
             st.session_state["post_library_new_post"] = True
             st.rerun()
+        if st.button(
+            "Reprendre les planifiés",
+            key="library_reuse_scheduled",
+            use_container_width=True,
+            disabled=not client and not db.list_reusable_scheduled_posts(future_only=False),
+            help="Sélectionne une seule fois chaque texte déjà accepté par Postoria.",
+        ):
+            st.session_state["reuse_scheduled_posts_dialog"] = True
+            st.session_state.pop("reuse_scheduled_remote_rows", None)
+            st.session_state.pop("reuse_scheduled_remote_error", None)
 
         finder_buttons = [
             ("all", f"Tous les posts · {len(all_posts)}"),
@@ -1576,6 +1739,7 @@ def render_post_library_workspace() -> None:
 
     if st.session_state.get("post_library_edit_id"):
         render_post_editor_dialog(int(st.session_state["post_library_edit_id"]))
+    render_reuse_scheduled_posts_dialog(client)
 
 
 def render_photo_workspace(client: PostoriaClient | None) -> None:
@@ -6344,7 +6508,7 @@ if active_page != "dashboard" and active_step == 2:
             f"{posts_min_required if posts_min_required == posts_max_required else f'{posts_min_required}-{posts_max_required}'} publications. "
             "Si tu sélectionnes moins de textes que nécessaire, ils tourneront en rotation."
         )
-        render_post_library_workspace()
+        render_post_library_workspace(client)
         st.stop()
 
         st.markdown("#### Dossiers média")
@@ -6924,6 +7088,25 @@ if active_page != "dashboard" and active_step == 4:
         "Contrôle exactement ce qui va partir: compte, groupe, heure, média, statut, erreurs.",
         "Utilise les filtres avant de passer à l'envoi. Failed et erreurs restent visibles ici.",
     )
+    reuse_col, reuse_note = st.columns([1, 2.4], gap="medium")
+    with reuse_col:
+        if st.button(
+            "Reprendre les planifiés",
+            key="preview_reuse_scheduled",
+            use_container_width=True,
+            disabled=not client and not db.list_reusable_scheduled_posts(future_only=False),
+        ):
+            st.session_state["reuse_scheduled_posts_dialog"] = True
+            st.session_state.pop("reuse_scheduled_remote_rows", None)
+            st.session_state.pop("reuse_scheduled_remote_error", None)
+    with reuse_note:
+        st.caption(
+            "Récupère les textes déjà acceptés par Postoria, une seule fois par texte, puis utilise la cadence actuelle pour générer une nouvelle preview."
+        )
+    reuse_notice = str(st.session_state.pop("scheduled_reuse_notice", "") or "").strip()
+    if reuse_notice:
+        st.success(reuse_notice)
+    render_reuse_scheduled_posts_dialog(client)
     current = settings()
     capacity = max_posts_for_period(current["publish_date"], current["publish_end_date"], current["start_time"], current["end_time"], int(current["min_interval"]))
     enough_context = (

@@ -567,6 +567,19 @@ def set_post_favorite(post_id: int, is_favorite: bool) -> None:
         )
 
 
+def set_posts_active(post_ids: Iterable[int], is_active: bool = True) -> int:
+    clean_ids = sorted({int(post_id) for post_id in post_ids})
+    if not clean_ids:
+        return 0
+    placeholders = ",".join("?" for _ in clean_ids)
+    with connect() as conn:
+        cursor = conn.execute(
+            f"UPDATE post_library SET is_active=? WHERE id IN ({placeholders})",
+            (int(bool(is_active)), *clean_ids),
+        )
+        return int(cursor.rowcount or 0)
+
+
 def list_posts(active_only: bool = True) -> list[dict[str, Any]]:
     query = """
         SELECT p.*,
@@ -1707,3 +1720,34 @@ def list_scheduled(status: str | None = None) -> list[dict[str, Any]]:
     query += " ORDER BY scheduled_time_local ASC"
     with connect() as conn:
         return [_hydrate_media(r) for r in conn.execute(query, params).fetchall()]
+
+
+def list_reusable_scheduled_posts(future_only: bool = True) -> list[dict[str, Any]]:
+    """Return one accepted Postoria row per unique caption, newest first."""
+    query = """
+        SELECT *
+        FROM scheduled_posts
+        WHERE postoria_post_id IS NOT NULL
+          AND status NOT IN ('preview', 'preview_saved')
+          AND lower(COALESCE(status, '')) NOT LIKE '%fail%'
+          AND lower(COALESCE(status, '')) NOT LIKE '%error%'
+    """
+    if future_only:
+        query += " AND scheduled_time_utc > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+    query += " ORDER BY scheduled_time_utc DESC, id DESC"
+
+    unique_rows: list[dict[str, Any]] = []
+    seen_hashes: set[str] = set()
+    with connect() as conn:
+        rows = conn.execute(query).fetchall()
+    for raw_row in rows:
+        row = _hydrate_media(raw_row)
+        caption = str(row.get("caption") or "").strip()
+        if not caption:
+            continue
+        clean_hash = str(row.get("caption_hash") or caption_hash(caption))
+        if clean_hash in seen_hashes:
+            continue
+        seen_hashes.add(clean_hash)
+        unique_rows.append(row)
+    return unique_rows

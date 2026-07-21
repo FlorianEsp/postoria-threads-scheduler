@@ -48,6 +48,30 @@ class PostoriaClient:
     def list_social_accounts(self, workspace_id: int) -> list[dict]:
         return self._request("GET", f"/workspaces/{workspace_id}/social-accounts").get("data", [])
 
+    def list_posts(self, workspace_id: int, max_items: int = 500) -> list[dict]:
+        """Read recent Postoria posts without loading an unbounded workspace history."""
+        rows: list[dict] = []
+        cursor = ""
+        safe_max = max(1, min(int(max_items), 1000))
+        while len(rows) < safe_max:
+            params = {"limit": min(100, safe_max - len(rows))}
+            if cursor:
+                params["cursor"] = cursor
+            response = self._request(
+                "GET",
+                f"/workspaces/{int(workspace_id)}/posts",
+                params=params,
+            )
+            page = response.get("data", []) if isinstance(response, dict) else []
+            if not isinstance(page, list) or not page:
+                break
+            rows.extend(item for item in page if isinstance(item, dict))
+            pagination = response.get("pagination", {}) if isinstance(response, dict) else {}
+            cursor = str(pagination.get("next_cursor") or "") if isinstance(pagination, dict) else ""
+            if not pagination.get("has_more") or not cursor:
+                break
+        return rows[:safe_max]
+
     def create_post(
         self,
         workspace_id: int,
